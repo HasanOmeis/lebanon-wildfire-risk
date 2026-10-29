@@ -1,0 +1,40 @@
+# ignore the virtual environment folder, it's huge and rebuilt from requirements.txt
+.venv/
+
+# ignore the .env file so your secret API key never reaches GitHub
+.env
+
+# ignore Python's compiled cache files
+__pycache__/
+
+# ignore any compiled Python file anywhere
+*.pyc
+
+# ignore Jupyter's auto-saved notebook backups
+.ipynb_checkpoints/
+
+# ignore everything inside the data folders (data is downloaded, not stored in Git)
+data/raw/*
+data/processed/*
+data/external/*
+
+# but keep the placeholder files so the folders still exist on GitHub
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/external/.gitkeep
+
+# ignore saved model files (they're large and re-trained)
+models/*
+
+# but keep the models placeholder file
+!models/.gitkeep
+
+# ignore MLflow's local experiment-tracking folders
+mlruns/
+mlartifacts/
+
+# ignore Optuna and other local database files
+*.db
+
+# ignore VS Code's personal settings folder
+.vscode/
