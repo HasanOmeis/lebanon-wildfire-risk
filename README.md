@@ -59,7 +59,3 @@ Scripts:
 - `src/clean_firms.py` — filters and saves to `data/raw/firms_lebanon.parquet`
 - `src/check_firms.py` — prints summary checks
 
-## Progress
-- [x] Day 1 — Project setup
-- [x] Day 2 — Fire data (NASA FIRMS)
-- [ ] Day 3 — Lebanon grid
