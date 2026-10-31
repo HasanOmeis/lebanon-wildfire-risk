@@ -39,5 +39,11 @@ mlartifacts/
 # ignore VS Code's personal settings folder
 .vscode/
 
-# ignore generated charts (rebuilt by the check scripts)
-reports/
+# ignore generated charts by default (the check scripts rebuild them)
+reports/*
+# but let Git look inside the figures folder
+!reports/figures/
+# ignore everything in the figures folder by default
+reports/figures/*
+# except the numbered EDA charts (01_..., 02_...), which the README shows
+!reports/figures/0*_*.png

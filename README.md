@@ -4,7 +4,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 
 ## Project Status
 
-🚧 **In progress — Day 5 of 18 complete (Day 4 weather download still running)**
+🚧 **In progress — Day 6 of 18 complete (Day 4 weather download still running)**
 
 | Day | Task | Status |
 |----|------|--------|
@@ -13,8 +13,8 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 | 3 | Lebanon grid (~5 km cells) | ✅ Done |
 | 4 | Weather data (Open-Meteo) | ⏳ Download in progress |
 | 5 | Vegetation (NDVI) + terrain | ✅ Done |
-| 6 | Exploratory data analysis | ⏳ Next |
-| 7 | Feature engineering | ⬜ |
+| 6 | Exploratory data analysis | ✅ Done |
+| 7 | Feature engineering | ⏳ Next |
 | 8 | Baseline model + MLflow | ⬜ |
 | 9 | LightGBM model | ⬜ |
 | 10 | Spatial/time validation | ⬜ |
@@ -35,7 +35,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 - **Copernicus DEM** (90 m) via Microsoft Planetary Computer: elevation and terrain
 
 ## Stack
-Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · LightGBM · MLflow · Optuna · SHAP · FastAPI · Docker · Streamlit
+Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · matplotlib · Jupyter · LightGBM · MLflow · Optuna · SHAP · FastAPI · Docker · Streamlit
 
 ## Setup
 1. `py -3.12 -m venv .venv`
@@ -60,7 +60,7 @@ Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · LightGB
 - Each cell gets one lat/lon point placed on land, used to fetch its weather
 - **9,527 fire detections** matched to their cells; 3,920 outside Lebanon removed (mostly Syrian farmland inside the bounding box)
 - **Persistent hotspot filter:** spots detected in ≥ 6 years *and* ≥ 8 calendar months are flagged as likely industrial heat sources (e.g. coastal power plants and cement works), not wildfires. That's 959 detections, kept but flagged.
-- Fire is rare: about **0.5% of cell-days** have a fire, so later models are judged with PR-AUC and recall, not accuracy
+- Fire is rare, so later models are judged with PR-AUC and recall, not accuracy (exact target rate in Day 6)
 
 ### Weather data (Day 4)
 - Source: Open-Meteo Historical Weather API, daily values from **2012-01-25 to 2026-10-29** (same range as the fire data)
@@ -81,15 +81,42 @@ Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · LightGB
 - **Parallel, resumable download:** a thread pool processes several dates at once; each date is saved as its own file and finished dates are skipped on rerun, so crashes and expired download links cost nothing
 - **Leakage guard:** every value gets an `available_date` = composite end date + 3 days (NASA's processing lag), so the model never uses vegetation data before it actually existed
 - Data quality: only **0.9% missing** (clouds); 3 tiny coastal sliver cells never covered; **catalog gap from 2025-06-26 to 2025-11-17** (most of the 2025 fire season). It is handled for now with forward-filling plus an "NDVI age" feature, and will be filled from NASA AppEEARS before validation.
-- Seasonal cycle: NDVI peaks in **April (~0.41)** and is lowest in **August–September (~0.30)**, right when fires peak
+- Seasonal cycle: NDVI peaks in **April–May (~0.40)** and is lowest in **August–September (~0.30)**, right when fires peak
 
 **Terrain**
 - Source: Copernicus DEM 90 m, reprojected to UTM 36N (meters), so slope math is correct
 - Slope and aspect computed from elevation gradients; aspect turned into **northness** (+1 north-facing, −1 south-facing) and **eastness**
-- Per-cell features: mean / max / std elevation, mean / max slope, mean northness, mean eastness, and **`south_steep_frac`**: the share of a cell that is both steep (> 10°) and south-facing. These are the sunniest, driest, fastest-burning slopes.
+- Per-cell features: mean / max / std elevation, mean / max slope, mean northness, mean eastness, and **`south_steep_frac`**: the share of a cell that is both steep (> 10°) and south-facing. These are the sunniest, driest slopes.
 - Sanity check: highest cell max ≈ 3,080 m (Qurnat as Sawda, 3,088 m); slopes mostly face west, toward the sea, as expected for Mount Lebanon
 
 **Outputs:** `data/processed/ndvi.parquet` (one row per cell per composite), `data/processed/terrain.parquet` (one row per cell)
+
+### Exploratory data analysis (Day 6)
+
+Notebook: [`notebooks/06_eda.ipynb`](notebooks/06_eda.ipynb) · Charts: `reports/figures/`
+
+The target is **"fire in this cell tomorrow"** on a table of **488 cells × 5,391 days = 2.63M cell-days**. Weather results use 2012–2015 for now and will be rerun once the download completes.
+
+**Key findings**
+1. **Extreme imbalance:** only **0.20%** of cell-days have a fire the next day (1 : 494). A model that always says "no fire" is 99.8% accurate and useless → PR-AUC and recall in the top-ranked cells, never accuracy.
+2. **Industrial hotspots confirmed:** the 959 flagged detections burn all year (flat monthly profile), while real wildfires peak Jul–Oct. The busiest spots sit on power plants and cement factories (Deir Ammar, Zahrani, Chekka, Jiyeh) → excluded from the target.
+3. **Season:** Jun–Oct. Burning cell-days peak in September, while detections per fire peak in October (bigger fires). The season is ~4× riskier, but still 99.6% negative. No weekday effect (~1.04×).
+4. **Conflict-driven shift:** the south is 13% of cells and ~20% of fire days in normal years, but **47% in 2024** (154 southern fire days in Oct 2024 alone) and **50% in 2026** (4–10× normal every month Jun–Sep). These spikes are not explained by season → metrics will be reported separately by region and period.
+5. **Fires cluster:** fire today → **30×** risk tomorrow, fire in the last 7 days → 11×, burning neighbour → 7×. But **~3/4 of next-day fires start in quiet cells**, so weather, vegetation and terrain must do most of the work.
+6. **Elevation** is the strongest static signal (Spearman −0.67): low cells burn ~25× more than the highest. Slope is mostly confounded with elevation; south-facing steep share shows no clear link on its own (kept for the model to judge).
+7. **Vegetation is a hump:** medium NDVI burns ~10× more than bare land and ~2× more than the greenest cells (fuel-limited vs moisture-limited) → favours tree models over linear ones.
+8. **Weather works as anomalies, not raw values:** raw weather mostly reflects geography (cool = mountains, humid = coast). Compared with each cell's own monthly normal, **humidity below normal → 3.7× more fires**, and VPD / evapotranspiration above normal → ~2.5×.
+9. **Data quality:** the FIRMS archive → near-real-time switch (Aug 2026) is safe (same detections per fire day and same intensity). Mostly-sea cells burn less while half-land coastal cells burn most → `land_frac` becomes a feature.
+
+![Fire timing](reports/figures/02_fire_timing.png)
+![NDVI vs fire](reports/figures/05_ndvi_vs_fire.png)
+![Weather anomalies vs fire](reports/figures/07_weather_anomaly_vs_fire.png)
+
+**What this decides for the next days**
+- **Day 7 features:** fire history (today, last 3/7 days, burning neighbours, past fire rate per cell), weather anomalies against a past-only normal, days since last rain, latest NDVI + NDVI age + drop from spring peak, terrain, `land_frac`, cyclical day of year
+- **Day 8 baseline to beat:** "fire today → fire tomorrow"
+- **Imbalance:** class weights, no resampling before the split
+- **Day 10 validation:** train on earlier years, test on later ones, with scores split by south vs rest and war vs normal periods
 
 ## Scripts
 
@@ -110,6 +137,8 @@ Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · LightGB
 | `src/combine_ndvi.py` | Combines the NDVI files, adds `available_date` and runs date/gap checks |
 | `src/terrain.py` | Downloads the 90 m DEM, computes slope/aspect and saves per-cell terrain features |
 | `src/check_day5.py` | Maps of NDVI, elevation and steep south-facing share + NDVI seasonal cycle |
+| `src/check_data.py` | Status report for every dataset: rows, columns, date range, missing values, download progress |
+| `notebooks/06_eda.ipynb` | Exploratory data analysis: target, hotspots, timing, location, conflict shift, terrain, NDVI, weather |
 
 ## Pipeline Order
 
@@ -125,3 +154,5 @@ Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · LightGB
 10. `python src\combine_ndvi.py`
 11. `python src\terrain.py`
 12. `python src\check_day5.py`
+13. `python src\check_data.py`
+14. Open `notebooks\06_eda.ipynb` and **Run All**
