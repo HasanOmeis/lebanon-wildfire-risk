@@ -38,3 +38,6 @@ mlartifacts/
 
 # ignore VS Code's personal settings folder
 .vscode/
+
+# ignore generated charts (rebuilt by the check scripts)
+reports/
