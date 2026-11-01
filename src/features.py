@@ -127,6 +127,29 @@ def add_weather(panel):  # today's weather plus rolling windows, all looking bac
     panel["dry_streak"] = streak.where(panel["precip"].notna()).astype("float32")  # NaN where there's no weather yet, not a fake 0
     return panel  # the panel with 20 new weather columns
 
+
+def add_weather_anomalies(panel):  # this week's weather minus the cell's normal for this month, from PAST years only
+    base = {  # daily variable used for the normal -> feature compared against it
+        "tmax": "tmax_mean_7d",  # hotter than usual this week?
+        "rh_min": "rh_min_mean_7d",  # drier air than usual this week?
+        "vpd_max": "vpd_max_mean_7d",  # thirstier air than usual this week?
+        "et0": "et0",  # the land losing more water than usual today?
+    }  # end of the map
+    year = panel["date"].dt.year.rename("year")  # calendar year of each row
+    month = panel["date"].dt.month.rename("month")  # calendar month of each row
+    monthly = panel.groupby(["cell_id", year, month])[list(base)].mean().reset_index()  # one average per cell, year and month
+    monthly = monthly.sort_values(["cell_id", "month", "year"])  # for each cell-month, the years in time order
+    normals = monthly.groupby(["cell_id", "month"])[list(base)].transform(lambda s: s.shift().expanding().mean())  # average of PREVIOUS years only (shift skips the current year)
+    normals.columns = [f"{c}_normal" for c in base]  # e.g. tmax -> tmax_normal
+    monthly = pd.concat([monthly[["cell_id", "year", "month"]], normals], axis=1)  # keys + normals side by side
+    keys = pd.DataFrame({"cell_id": panel["cell_id"], "year": year, "month": month})  # the key of every panel row
+    norm = keys.merge(monthly, on=["cell_id", "year", "month"], how="left")  # each row's normal, in the panel's row order
+    for var, feat in base.items():  # build one anomaly per variable
+        panel[f"{var}_anom"] = (panel[feat] - norm[f"{var}_normal"].to_numpy()).astype("float32")  # positive = above normal, negative = below
+    return panel  # the panel with 4 new columns
+
+
+
 def add_ndvi(panel):  # latest published vegetation index, its age, change and anomaly
     ndvi = pd.read_parquet(NDVI_PATH, columns=["cell_id", "ndvi", "valid_frac", "available_date"])  # use Day 5's availability date
     ndvi = ndvi[ndvi["ndvi"].notna() & (ndvi["valid_frac"] >= 0.2)].copy()  # drop cloudy composites (under 20% usable pixels)
@@ -193,6 +216,7 @@ def main():  # runs every step in order
     A = neighbor_matrix(grid, cell_ids)  # who touches whom
     panel = add_neighbor_fires(panel, A, cell_ids)  # neighbor fire counts
     panel = add_weather(panel)  # weather and dryness features
+    panel = add_weather_anomalies(panel)  # weather compared with each cell's past monthly normal
     panel = add_ndvi(panel)  # vegetation features
     panel = add_static_and_calendar(panel, grid)  # terrain, land share and calendar    
     print("Panel shape:", panel.shape)  # rows, columns
@@ -204,6 +228,7 @@ def main():  # runs every step in order
     missing = panel[feature_cols].isna().mean().sort_values(ascending=False)  # share of missing values per feature
     print("Features with missing values (top 5):")  # header for the next print
     print(missing[missing > 0].head().round(3).to_dict())  # mostly weather (until the download finishes) and a little NDVI
+    
 
 
 if __name__ == "__main__":  # only runs when you call: python src/features.py

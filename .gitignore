@@ -48,3 +48,7 @@ reports/figures/*
 # except the numbered EDA charts (01_..., 02_...), which the README shows
 !reports/figures/0*_*.png
 .pytest_cache/
+# MLflow (local experiment tracking)
+mlflow.db
+mlruns/
+!reports/baseline_results.csv

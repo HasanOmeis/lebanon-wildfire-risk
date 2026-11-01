@@ -4,7 +4,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 
 ## Project Status
 
-🚧 **In progress — Day 7 of 18 complete (Day 4 weather download still running)**
+🚧 **In progress — Day 8 of 18 complete (Day 4 weather download still running)**
 
 | Day | Task | Status |
 |----|------|--------|
@@ -15,8 +15,8 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 | 5 | Vegetation (NDVI) + terrain | ✅ Done |
 | 6 | Exploratory data analysis | ✅ Done |
 | 7 | Feature engineering | ✅ Done |
-| 8 | Baseline model + MLflow | ⏳ Next |
-| 9 | LightGBM model | ⬜ |
+| 8 | Baseline model + MLflow | ✅ Done |
+| 9 | LightGBM model | ⏳ Next |
 | 10 | Spatial/time validation | ⬜ |
 | 11 | Optuna tuning | ⬜ |
 | 12 | SHAP explainability | ⬜ |
@@ -35,7 +35,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 - **Copernicus DEM** (90 m) via Microsoft Planetary Computer: elevation and terrain
 
 ## Stack
-Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · matplotlib · Jupyter · pytest · LightGBM · MLflow · Optuna · SHAP · FastAPI · Docker · Streamlit
+Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · matplotlib · Jupyter · pytest · scikit-learn · LightGBM · MLflow · Optuna · SHAP · FastAPI · Docker · Streamlit
 
 ## Setup
 1. `py -3.12 -m venv .venv`
@@ -122,7 +122,7 @@ The target is **"fire in this cell tomorrow"** on a table of **488 cells × 5,39
 
 Script: [`src/features.py`](src/features.py) · Tests: [`tests/test_features.py`](tests/test_features.py) · Check notebook: [`notebooks/07_features_check.ipynb`](notebooks/07_features_check.ipynb)
 
-One row per **cell × day** (488 cells × 5,392 days ≈ **2.63M rows**, 48 features). The label `fire_tomorrow` = 1 if the cell has a non-industrial fire detection on day t+1 (hotspots excluded). Positive rate: **0.20%**. Each cell's last day has no label; those are the rows the daily pipeline will predict.
+One row per **cell × day** (488 cells × 5,392 days ≈ **2.63M rows**, 52 features). The label `fire_tomorrow` = 1 if the cell has a non-industrial fire detection on day t+1 (hotspots excluded). Positive rate: **0.20%**. Each cell's last day has no label; those are the rows the daily pipeline will predict.
 
 **Leakage rule:** a feature for day *t* uses only data available by the end of day *t*.
 - Rolling windows only look back; per-cell fire rate and NDVI monthly normals use **past days and past years only**
@@ -133,7 +133,7 @@ One row per **cell × day** (488 cells × 5,392 days ≈ **2.63M rows**, 48 feat
 |---|---|---|
 | Fire history | fires in last 7/30/365 days, days since last fire, past-only cell fire rate, today's detections and fire power | Recently burned cells: **~4.4×** |
 | Neighbours | neighbour fires today and in the last 7 days, number of neighbours | 1 burning neighbour **3.2×** · 2–3 **6×** · 4+ **~20×** |
-| Weather | daily max temp, min humidity, VPD, wind, gusts, ET0; 3/7-day means; 7/30/90-day rain; dry streak; 30-day ET0 | Hottest weeks **~2.5×**, longest dry streaks **~3.2×** |
+| Weather | daily max temp, min humidity, VPD, wind, gusts, ET0; 3/7-day means; 7/30/90-day rain; dry streak; 30-day ET0; **anomalies vs the cell's past-only monthly normal** (temp, humidity, VPD, ET0) | Hottest weeks **~2.5×**, longest dry streaks **~3.2×**; anomaly signal to be rechecked once all 15 years are downloaded |
 | Vegetation | latest published NDVI, its age, 30-day change, anomaly vs the cell's past monthly normal | Fast browning **~1.5×**; `ndvi_age_days` flags the 2025 gap (up to ~150 days old) |
 | Terrain + calendar | elevation, slope, aspect, south-steep share, land share, month, day-of-year (sin/cos), weekday | September fire rate **~10×** January |
 
@@ -146,6 +146,49 @@ One row per **cell × day** (488 cells × 5,392 days ≈ **2.63M rows**, 48 feat
 ![Feature lift](reports/figures/07_feature_lift.png)
 
 **Known gaps:** weather covers 2012–2015 until the download finishes (rebuild then); 3 coastal sliver cells have no NDVI (left as NaN for LightGBM, filled for the baseline).
+
+### Baseline model + MLflow (Day 8)
+
+Script: [`src/train_baseline.py`](src/train_baseline.py) · Results: [`reports/baseline_results.csv`](reports/baseline_results.csv)
+
+**Split by time, never at random** (a random split would let the model train on days after the ones it is tested on):
+
+| Split | Period | Rows | Fires | Fire rate |
+|---|---|---|---|---|
+| Train | 2012 – 2021 | 1.77M | 3,343 | 0.19% |
+| Validation | 2022 – 2023 | 356k | 593 | 0.17% |
+| Test | 2024 – Oct 2026 | 504k | 1,377 | 0.27% |
+
+The test period is held back and scored only once per final model. It includes the record 2024 season, so it is the harder period.
+
+**Metrics for a 0.2% positive rate** (accuracy is meaningless: "never fire" scores 99.8%):
+- **PR-AUC** (average precision): the main metric. A random guess scores about the fire rate, so **lift** = PR-AUC ÷ fire rate is reported too
+- **ROC-AUC**: overall ranking quality
+- **Recall@top5%**: share of tomorrow's fires that fall inside the 5% riskiest cells of each day (~24 of 488 cells), the number a fire team would act on
+
+The scorer was checked on random scores first (PR-AUC ≈ fire rate, ROC-AUC ≈ 0.5, recall ≈ 5%).
+
+**Validation results**
+
+| Model | PR-AUC | Lift | ROC-AUC | Recall@top5% |
+|---|---|---|---|---|
+| Climatology (cell's past fire rate) | 0.0056 | 3.4× | 0.79 | 21% |
+| Persistence (fires in the last 7 days) | 0.0080 | 4.8× | 0.57 | 19% |
+| **Logistic regression** | **0.0198** | **11.9×** | **0.85** | **30%** |
+
+- The two rule-based baselines need no training and set the bar: each catches a different part of the signal ("where it burns" vs "what burned recently").
+- Logistic regression combines both with vegetation, terrain and calendar features: **2.5× the PR-AUC of the best rule**, and the daily top 5% of cells holds **30%** of next-day fires.
+- Its riskiest predictions reach ~10–20% precision, against a 0.17% random rate.
+
+**Pipeline:** median imputer with missing-value flags → standard scaler → logistic regression (`class_weight="balanced"`), built as one scikit-learn pipeline so training and prediction always run the same steps. Training takes ~30 s on 1.77M rows.
+
+**Experiment tracking (MLflow):** every run logs its parameters, validation metrics, a precision-recall curve and, for real models, the fitted pipeline with its input signature (all inputs declared as floats, so missing values never break the API later). Runs are stored locally in `mlflow.db` + `mlruns/` (kept out of Git). View them with:
+
+```bash
+mlflow ui --backend-store-uri sqlite:///mlflow.db --port 5000
+```
+
+**Known limitation:** weather is still downloading (~74% missing; 2022–2023 has none yet), so these scores come mostly from fire history, NDVI, terrain and calendar. The model will be retrained once the download completes, and MLflow will show the before/after.
 
 ## Scripts
 
@@ -168,6 +211,7 @@ One row per **cell × day** (488 cells × 5,392 days ≈ **2.63M rows**, 48 feat
 | `src/check_day5.py` | Maps of NDVI, elevation and steep south-facing share + NDVI seasonal cycle |
 | `src/check_data.py` | Status report for every dataset: rows, columns, date range, missing values, download progress |
 | `src/features.py` | Builds the leakage-safe feature table (`features.parquet`) and the feature list (`feature_columns.json`) |
+| `src/train_baseline.py` | Time split, naive baselines, logistic regression, MLflow logging; saves `reports/baseline_results.csv` |
 | `tests/test_features.py` | pytest checks: future-leakage test, label correctness, completeness, NDVI timing, feature list |
 | `notebooks/06_eda.ipynb` | Exploratory data analysis: target, hotspots, timing, location, conflict shift, terrain, NDVI, weather |
 | `notebooks/07_features_check.ipynb` | Missing values per feature and feature lift charts |
@@ -191,3 +235,4 @@ One row per **cell × day** (488 cells × 5,392 days ≈ **2.63M rows**, 48 feat
 15. `python src\features.py`
 16. `python -m pytest -v`
 17. Open `notebooks\07_features_check.ipynb` and **Run All**
+18. `python src\train_baseline.py`
