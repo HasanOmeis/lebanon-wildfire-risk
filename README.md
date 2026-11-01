@@ -4,7 +4,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 
 ## Project Status
 
-🚧 **In progress — Day 6 of 18 complete (Day 4 weather download still running)**
+🚧 **In progress — Day 7 of 18 complete (Day 4 weather download still running)**
 
 | Day | Task | Status |
 |----|------|--------|
@@ -14,8 +14,8 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 | 4 | Weather data (Open-Meteo) | ⏳ Download in progress |
 | 5 | Vegetation (NDVI) + terrain | ✅ Done |
 | 6 | Exploratory data analysis | ✅ Done |
-| 7 | Feature engineering | ⏳ Next |
-| 8 | Baseline model + MLflow | ⬜ |
+| 7 | Feature engineering | ✅ Done |
+| 8 | Baseline model + MLflow | ⏳ Next |
 | 9 | LightGBM model | ⬜ |
 | 10 | Spatial/time validation | ⬜ |
 | 11 | Optuna tuning | ⬜ |
@@ -35,7 +35,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 - **Copernicus DEM** (90 m) via Microsoft Planetary Computer: elevation and terrain
 
 ## Stack
-Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · matplotlib · Jupyter · LightGBM · MLflow · Optuna · SHAP · FastAPI · Docker · Streamlit
+Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · matplotlib · Jupyter · pytest · LightGBM · MLflow · Optuna · SHAP · FastAPI · Docker · Streamlit
 
 ## Setup
 1. `py -3.12 -m venv .venv`
@@ -118,6 +118,35 @@ The target is **"fire in this cell tomorrow"** on a table of **488 cells × 5,39
 - **Imbalance:** class weights, no resampling before the split
 - **Day 10 validation:** train on earlier years, test on later ones, with scores split by south vs rest and war vs normal periods
 
+### Feature engineering (Day 7)
+
+Script: [`src/features.py`](src/features.py) · Tests: [`tests/test_features.py`](tests/test_features.py) · Check notebook: [`notebooks/07_features_check.ipynb`](notebooks/07_features_check.ipynb)
+
+One row per **cell × day** (488 cells × 5,392 days ≈ **2.63M rows**, 48 features). The label `fire_tomorrow` = 1 if the cell has a non-industrial fire detection on day t+1 (hotspots excluded). Positive rate: **0.20%**. Each cell's last day has no label; those are the rows the daily pipeline will predict.
+
+**Leakage rule:** a feature for day *t* uses only data available by the end of day *t*.
+- Rolling windows only look back; per-cell fire rate and NDVI monthly normals use **past days and past years only**
+- NDVI is joined with an **as-of join** (`merge_asof`) on its publication date (end date + 3 days), never its start date
+- A **pytest leakage test** builds features from synthetic data, adds fires in the future, and asserts that every earlier row stays identical. 7 tests in total (label = next-day fire, no duplicates, complete grid, NDVI never from the future, feature list matches the file).
+
+| Group | Features | Signal (lift vs average) |
+|---|---|---|
+| Fire history | fires in last 7/30/365 days, days since last fire, past-only cell fire rate, today's detections and fire power | Recently burned cells: **~4.4×** |
+| Neighbours | neighbour fires today and in the last 7 days, number of neighbours | 1 burning neighbour **3.2×** · 2–3 **6×** · 4+ **~20×** |
+| Weather | daily max temp, min humidity, VPD, wind, gusts, ET0; 3/7-day means; 7/30/90-day rain; dry streak; 30-day ET0 | Hottest weeks **~2.5×**, longest dry streaks **~3.2×** |
+| Vegetation | latest published NDVI, its age, 30-day change, anomaly vs the cell's past monthly normal | Fast browning **~1.5×**; `ndvi_age_days` flags the 2025 gap (up to ~150 days old) |
+| Terrain + calendar | elevation, slope, aspect, south-steep share, land share, month, day-of-year (sin/cos), weekday | September fire rate **~10×** January |
+
+**Engineering choices**
+- **Neighbour counts by matrix multiplication:** fires as a days × cells matrix times a 488 × 488 adjacency matrix gives every cell's neighbour fires for every day in one operation, instead of merging ~20M rows
+- **One reusable script, not a notebook:** the same code will run in the Day 15 daily pipeline; `feature_columns.json` stores the exact feature list so training and the API always use the same columns
+- **Excluded on purpose:** `year` (can't generalize to future years) and raw lat/lon (lets the model memorize places instead of learning drivers; `cell_fire_rate` carries the "this place burns" signal from the past only)
+- **Honest finding:** `south_steep_frac` falls at the top end, because the steepest cells are high, rocky slopes with little fuel; it's confounded with elevation, which SHAP will untangle on Day 12
+
+![Feature lift](reports/figures/07_feature_lift.png)
+
+**Known gaps:** weather covers 2012–2015 until the download finishes (rebuild then); 3 coastal sliver cells have no NDVI (left as NaN for LightGBM, filled for the baseline).
+
 ## Scripts
 
 | Script | What it does |
@@ -138,7 +167,10 @@ The target is **"fire in this cell tomorrow"** on a table of **488 cells × 5,39
 | `src/terrain.py` | Downloads the 90 m DEM, computes slope/aspect and saves per-cell terrain features |
 | `src/check_day5.py` | Maps of NDVI, elevation and steep south-facing share + NDVI seasonal cycle |
 | `src/check_data.py` | Status report for every dataset: rows, columns, date range, missing values, download progress |
+| `src/features.py` | Builds the leakage-safe feature table (`features.parquet`) and the feature list (`feature_columns.json`) |
+| `tests/test_features.py` | pytest checks: future-leakage test, label correctness, completeness, NDVI timing, feature list |
 | `notebooks/06_eda.ipynb` | Exploratory data analysis: target, hotspots, timing, location, conflict shift, terrain, NDVI, weather |
+| `notebooks/07_features_check.ipynb` | Missing values per feature and feature lift charts |
 
 ## Pipeline Order
 
@@ -156,3 +188,6 @@ The target is **"fire in this cell tomorrow"** on a table of **488 cells × 5,39
 12. `python src\check_day5.py`
 13. `python src\check_data.py`
 14. Open `notebooks\06_eda.ipynb` and **Run All**
+15. `python src\features.py`
+16. `python -m pytest -v`
+17. Open `notebooks\07_features_check.ipynb` and **Run All**
