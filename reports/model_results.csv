@@ -2,4 +2,4 @@ model,lift,pr_auc,roc_auc,recall_top5
 climatology,3.3699,0.0056,0.7922,0.2108
 persistence,4.8206,0.008,0.5733,0.1906
 logreg,11.3519,0.0189,0.8516,0.2951
-lightgbm,9.5535,0.0159,0.8641,0.3035
+lightgbm,9.1125,0.0152,0.8594,0.2901

@@ -202,7 +202,7 @@ Same split, same rows and the same scoring function as Day 8 (imported, not copi
 - Imbalance: `scale_pos_weight = √529 ≈ 23`. The full ratio (529) makes trees bend around the 3,343 training fires; it also inflates probabilities, so scores are used for **ranking**, not as real chances
 - Early stopping on validation PR-AUC (patience 100 trees)
 
-**First attempt overfit:** with default-style settings (31 leaves, 200 rows per leaf, learning rate 0.05), validation PR-AUC peaked at **tree 31** (0.0104) and then fell. Stronger regularization fixed it: 15 leaves, ≥ 1,000 rows per leaf, half the features per tree, L2 = 10, learning rate 0.02 → best at **tree 188**, PR-AUC **0.0159**.
+**First attempt overfit:** with default-style settings (31 leaves, 200 rows per leaf, learning rate 0.05), validation PR-AUC peaked at **tree 31** (0.0104) and then fell. Stronger regularization fixed it: 15 leaves, ≥ 1,000 rows per leaf, half the features per tree, L2 = 10, learning rate 0.02 → best at **tree 199**, PR-AUC **0.0152**.
 
 **Validation results (2022–2023, 593 fires)**
 
@@ -211,11 +211,21 @@ Same split, same rows and the same scoring function as Day 8 (imported, not copi
 | Climatology | 0.0056 | 3.4× | 0.79 | 21.1% |
 | Persistence | 0.0080 | 4.8× | 0.57 | 19.1% |
 | Logistic regression | **0.0189** | **11.4×** | 0.85 | 29.5% |
-| **LightGBM** | 0.0158 | 9.5× | **0.87** | **31.9%** |
+| **LightGBM** | 0.0152 | 9.1× | **0.86** | 29.0% |
 
-- **Roughly a tie, read honestly:** logreg is sharper at the very top of its ranking (higher PR-AUC); LightGBM ranks better overall (ROC-AUC) and is level on recall in each day's top 5% of cells (+0.8 points, ~5 fires, within noise).
-- **Class weighting isn't clearly helping:** a run with no weighting and no bagging (caused by a copy-paste slip that commented both settings out) scored the same (PR-AUC 0.0158, recall@top5% 31.9%). Both runs are in MLflow; Day 11's Optuna search includes `scale_pos_weight = 1`.
-- One 2-year validation window (593 fires) is noisy; Day 10's multi-fold time validation decides whether either model really leads.
+- **Level with logistic regression, read honestly:** logreg is sharper at the very top of its ranking (higher PR-AUC), LightGBM ranks slightly better overall (ROC-AUC), and both catch ~29–30% of next-day fires in each day's top 5% of cells.
+
+**Ablation: does weighting or bagging help?**
+
+| Run | `scale_pos_weight` | Bagging (80% rows) | PR-AUC | ROC-AUC | Recall@top5% |
+|---|---|---|---|---|---|
+| A | 1 (off) | off | 0.0158 | 0.866 | 31.9% |
+| B | √529 ≈ 23 | off | 0.0159 | 0.864 | 30.4% |
+| D (final) | √529 ≈ 23 | on | 0.0152 | 0.859 | 29.0% |
+
+- Neither setting helps: the plainest run scored best on recall, though the gaps (~17 fires of 593) are near the noise level of one validation window.
+- Lesson from the process: two runs were invalid because pasted settings ended up inside `#` comments. Each run is checked against its logged parameters in MLflow before the scores are trusted.
+- Next: Day 10's multi-fold time validation measures the noise; Day 11's Optuna search covers `scale_pos_weight` (including 1) and the bagging settings.
 
 **What the trees rely on (gain):** `days_since_fire` and `cell_fire_rate` (where fires happen) far ahead, then `tmax` and `tmax_mean_7d` (when). Weather is the trees' #3–4 driver, while it added nothing to logistic regression. The top two features drift over time (noisy early years, "never burned" mostly at the start), so Day 10 checks how stable they are across periods.
 

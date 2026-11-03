@@ -40,9 +40,11 @@ def build_params(pos_weight):  # hand-picked starting settings (Optuna tunes the
         "num_leaves": 15,  # simpler trees, which can't carve out tiny groups of rows
         "min_child_samples": 1000,  # each leaf needs 1,000 rows, so no leaf is built around a handful of fires
         "feature_fraction": 0.5,  # each tree sees only half the features, so it can't lean on one drifting column
-        "bagging_fraction": 0.8,  # each tree trains on a random 80% of the rows        "bagging_freq": 1,  # redraw that 80% of rows for every tree
+        "bagging_fraction": 0.8,  # each tree trains on a random 80% of the rows
+        "bagging_freq": 1,  # redraw that 80% of rows for every tree        
         "lambda_l2": 10.0,  # stronger penalty on extreme leaf values
-        "scale_pos_weight": pos_weight ** 0.5,  # square root of 529 ≈ 23: a moderate push toward fires        "seed": 42,  # same random choices every run, so results are repeatable
+        "scale_pos_weight": pos_weight ** 0.5,  # square root of 529 ≈ 23: a moderate push toward fires
+        "seed": 42,  # same random choices every run, so results are repeatable        
         "verbose": -1,  # hide LightGBM's internal warnings
     }  # end of settings
 
