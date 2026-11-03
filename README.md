@@ -4,20 +4,20 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 
 ## Project Status
 
-🚧 **In progress — Day 8 of 18 complete (Day 4 weather download still running)**
+🚧 **In progress — Day 9 of 18 complete**
 
 | Day | Task | Status |
 |----|------|--------|
 | 1 | Setup (repo, venv, structure) | ✅ Done |
 | 2 | Fire data (NASA FIRMS) | ✅ Done |
 | 3 | Lebanon grid (~5 km cells) | ✅ Done |
-| 4 | Weather data (Open-Meteo) | ⏳ Download in progress |
+| 4 | Weather data (Open-Meteo) |  ✅ Done |
 | 5 | Vegetation (NDVI) + terrain | ✅ Done |
 | 6 | Exploratory data analysis | ✅ Done |
 | 7 | Feature engineering | ✅ Done |
 | 8 | Baseline model + MLflow | ✅ Done |
-| 9 | LightGBM model | ⏳ Next |
-| 10 | Spatial/time validation | ⬜ |
+| 9 | LightGBM model |  ✅ Done |
+| 10 | Spatial/time validation | ⏳ Next |
 | 11 | Optuna tuning | ⬜ |
 | 12 | SHAP explainability | ⬜ |
 | 13 | FastAPI service | ⬜ |
@@ -66,7 +66,7 @@ Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · matplot
 - Source: Open-Meteo Historical Weather API, daily values from **2012-01-25 to 2026-10-29** (same range as the fire data)
 - 7 fire-weather variables: max temperature, min relative humidity, precipitation, max wind speed, max wind gusts, FAO evapotranspiration, max vapour pressure deficit
 - **Key decision: a 0.1° weather grid instead of 488 cells.** Open-Meteo's historical model has a grid point about every 10 km, so neighbouring 5 km cells get the same weather anyway. Each cell is snapped to its nearest 0.1° point, giving **126 weather points** (~3.9 cells each). The data quality is the same, and the API cost drops from ~131k to ~34k calls.
-- **Resumable download:** 90 batches (15 years × 6 groups of 21 points), each saved as soon as it arrives. Every run skips finished batches, stops below the 10,000 calls/day free limit, paces requests under the hourly limit, and retries failures. The full download takes ~4 daily runs.
+- **Resumable download:** 90 batches (15 years × 6 groups of 21 points), each saved as soon as it arrives. Every run skips finished batches, stops below the 10,000 calls/day free limit, paces requests under the hourly limit, and retries failures. **Completed Nov 3, 2026:** all 90 batches, 2,631,296 cell-days (488 cells × 5,392 days), no missing values.
 - Output: `data/processed/weather_daily.parquet`, one row per cell per day (~2.6M rows when complete)
 - Sanity check: hot, dry summers (Jul–Aug max ≈ 30°C, near-zero rain Jun–Sep), wet winters, vapour pressure deficit peaking in the fire season, and much colder winters at high inland cells than on the coast
 
@@ -145,7 +145,7 @@ One row per **cell × day** (488 cells × 5,392 days ≈ **2.63M rows**, 52 feat
 
 ![Feature lift](reports/figures/07_feature_lift.png)
 
-**Known gaps:** weather covers 2012–2015 until the download finishes (rebuild then); 3 coastal sliver cells have no NDVI (left as NaN for LightGBM, filled for the baseline).
+**Known gaps:** 3 coastal sliver cells have no NDVI (left as NaN for LightGBM, filled for the baseline). Weather anomalies are missing for the first ~year (6.3% of rows), since no past normal exists yet.
 
 ### Baseline model + MLflow (Day 8)
 
@@ -174,7 +174,7 @@ The scorer was checked on random scores first (PR-AUC ≈ fire rate, ROC-AUC ≈
 |---|---|---|---|---|
 | Climatology (cell's past fire rate) | 0.0056 | 3.4× | 0.79 | 21% |
 | Persistence (fires in the last 7 days) | 0.0080 | 4.8× | 0.57 | 19% |
-| **Logistic regression** | **0.0198** | **11.9×** | **0.85** | **30%** |
+| | **Logistic regression** | **0.0189** | **11.4×** | **0.85** | **30%** |
 
 - The two rule-based baselines need no training and set the bar: each catches a different part of the signal ("where it burns" vs "what burned recently").
 - Logistic regression combines both with vegetation, terrain and calendar features: **2.5× the PR-AUC of the best rule**, and the daily top 5% of cells holds **30%** of next-day fires.
@@ -188,7 +188,38 @@ The scorer was checked on random scores first (PR-AUC ≈ fire rate, ROC-AUC ≈
 mlflow ui --backend-store-uri sqlite:///mlflow.db --port 5000
 ```
 
-**Known limitation:** weather is still downloading (~74% missing; 2022–2023 has none yet), so these scores come mostly from fire history, NDVI, terrain and calendar. The model will be retrained once the download completes, and MLflow will show the before/after.
+**Rerun with full weather (Day 9):** once the weather download finished, all baselines were retrained. Logistic regression barely moved (lift 11.9× → 11.4×, within noise). Fire weather works through thresholds and combinations (hot *and* dry *and* windy), which a linear model can't capture. That's the motivation for tree models.
+
+### LightGBM (Day 9)
+
+Script: [`src/train_lgbm.py`](src/train_lgbm.py) · Results: [`reports/model_results.csv`](reports/model_results.csv)
+
+Same split, same rows and the same scoring function as Day 8 (imported, not copied), so the comparison is exact.
+
+**Setup**
+- No imputer or scaler: trees route missing values themselves and ignore feature scale
+- `month` and `day_of_week` as fixed-category features (same codes in every split)
+- Imbalance: `scale_pos_weight = √529 ≈ 23`. The full ratio (529) makes trees bend around the 3,343 training fires; it also inflates probabilities, so scores are used for **ranking**, not as real chances
+- Early stopping on validation PR-AUC (patience 100 trees)
+
+**First attempt overfit:** with default-style settings (31 leaves, 200 rows per leaf, learning rate 0.05), validation PR-AUC peaked at **tree 31** (0.0104) and then fell. Stronger regularization fixed it: 15 leaves, ≥ 1,000 rows per leaf, half the features per tree, L2 = 10, learning rate 0.02 → best at **tree 203**, PR-AUC **0.0158**.
+
+**Validation results (2022–2023, 593 fires)**
+
+| Model | PR-AUC | Lift | ROC-AUC | Recall@top5% |
+|---|---|---|---|---|
+| Climatology | 0.0056 | 3.4× | 0.79 | 21.1% |
+| Persistence | 0.0080 | 4.8× | 0.57 | 19.1% |
+| Logistic regression | **0.0189** | **11.4×** | 0.85 | 29.5% |
+| **LightGBM** | 0.0158 | 9.5× | **0.87** | **31.9%** |
+
+- **Mixed result, read honestly:** logreg is sharper at the very top of its ranking (higher PR-AUC). LightGBM ranks better overall and catches more fires in each day's top 5% of cells (+2.4 points, ~14 more fires). The top 5% is what the risk map flags, so LightGBM leads on the operational metric.
+- One 2-year validation window is noisy; Day 10's multi-fold time validation decides whether the gap is real, and Day 11 tunes LightGBM with Optuna.
+
+**What the trees rely on (gain):** `days_since_fire` and `cell_fire_rate` (where fires happen) far ahead, then `tmax` and `tmax_mean_7d` (when). Weather is the trees' #3–4 driver, while it added nothing to logistic regression. The top two features drift over time (noisy early years, "never burned" mostly at the start), so Day 10 checks how stable they are across periods.
+
+**MLflow:** logged to the same `wildfire-baseline` experiment, tagged `stage=lightgbm`, with all parameters, best iteration, metrics, PR curve, a feature-importance chart and the model.
+
 
 ## Scripts
 
@@ -212,6 +243,7 @@ mlflow ui --backend-store-uri sqlite:///mlflow.db --port 5000
 | `src/check_data.py` | Status report for every dataset: rows, columns, date range, missing values, download progress |
 | `src/features.py` | Builds the leakage-safe feature table (`features.parquet`) and the feature list (`feature_columns.json`) |
 | `src/train_baseline.py` | Time split, naive baselines, logistic regression, MLflow logging; saves `reports/baseline_results.csv` |
+| `src/train_lgbm.py` | LightGBM with early stopping, same split + metrics as the baseline, MLflow logging; saves `reports/model_results.csv` |
 | `tests/test_features.py` | pytest checks: future-leakage test, label correctness, completeness, NDVI timing, feature list |
 | `notebooks/06_eda.ipynb` | Exploratory data analysis: target, hotspots, timing, location, conflict shift, terrain, NDVI, weather |
 | `notebooks/07_features_check.ipynb` | Missing values per feature and feature lift charts |
@@ -236,3 +268,4 @@ mlflow ui --backend-store-uri sqlite:///mlflow.db --port 5000
 16. `python -m pytest -v`
 17. Open `notebooks\07_features_check.ipynb` and **Run All**
 18. `python src\train_baseline.py`
+19. `python src\train_lgbm.py`

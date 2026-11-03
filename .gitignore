@@ -52,3 +52,4 @@ reports/figures/*
 mlflow.db
 mlruns/
 !reports/baseline_results.csv
+!reports/model_results.csv
