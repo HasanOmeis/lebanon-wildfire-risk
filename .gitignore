@@ -57,3 +57,7 @@ mlruns/
 !reports/validation_*.csv
 !reports/validation_config.json
 !reports/validation_comparison.png
+# Day 11 tuning and final test results shown in the README
+!reports/tuning_*.csv
+!reports/final_test*.csv
+!reports/figures/1*_*.png

@@ -1,0 +1,22 @@
+{
+  "source": "optuna study 'lgbm-time-folds', trial 60 of 70",
+  "cv_scheme": "walk-forward time folds, test years 2018-2023",
+  "cv_mean_pr_auc": 0.02233706478447098,
+  "cv_mean_recall_top5": 0.2592068065718955,
+  "num_rounds": 350,
+  "weight_power": 0.006655510996339761,
+  "lgb_params": {
+    "objective": "binary",
+    "learning_rate": 0.014011551100882688,
+    "num_leaves": 21,
+    "min_child_samples": 4824,
+    "feature_fraction": 0.49346984967127083,
+    "bagging_fraction": 0.7341569874123697,
+    "bagging_freq": 1,
+    "lambda_l1": 0.009753175876902824,
+    "lambda_l2": 0.0020242211660128698,
+    "min_gain_to_split": 0.20555325571990757,
+    "seed": 42,
+    "verbose": -1
+  }
+}

@@ -4,7 +4,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 
 ## Project Status
 
-🚧 **In progress — Day 10 of 18 complete**
+🚧 **In progress — Day 11 of 18 complete**
 
 | Day | Task | Status |
 |----|------|--------|
@@ -18,8 +18,8 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 | 8 | Baseline model + MLflow | ✅ Done |
 | 9 | LightGBM model |  ✅ Done |
 | 10 | Spatial/time validation | ✅ Done |
-| 11 | Optuna tuning | ⏳ Next |
-| 12 | SHAP explainability | ⬜ |
+| 11 | Optuna tuning | ✅ Done |
+| 12 | SHAP explainability | ⏳ Next |
 | 13 | FastAPI service | ⬜ |
 | 14 | Docker | ⬜ |
 | 15 | Daily pipeline | ⬜ |
@@ -31,7 +31,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 - **NASA FIRMS**: satellite fire detections (VIIRS, 375 m)
 - **geoBoundaries**: Lebanon's country border
 - **Open-Meteo**: daily historical weather
-- **MODIS NDVI** (Terra + Aqua, 250 m, 16-day composites) via Microsoft Planetary Computer: vegetation greenness
+- **MODIS NDVI** (Terra + Aqua, 250 m, 16-day composites) via Microsoft Planetary Computer: vegetation greenness; the Jun–Nov 2025 catalog gap filled from **NASA AppEEARS**
 - **Copernicus DEM** (90 m) via Microsoft Planetary Computer: elevation and terrain
 
 ## Stack
@@ -80,7 +80,7 @@ Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · matplot
 - Reprocessed duplicate images are removed (newest version kept per date and tile)
 - **Parallel, resumable download:** a thread pool processes several dates at once; each date is saved as its own file and finished dates are skipped on rerun, so crashes and expired download links cost nothing
 - **Leakage guard:** every value gets an `available_date` = composite end date + 3 days (NASA's processing lag), so the model never uses vegetation data before it actually existed
-- Data quality: only **0.9% missing** (clouds); 3 tiny coastal sliver cells never covered; **catalog gap from 2025-06-26 to 2025-11-17** (most of the 2025 fire season). It is handled with forward-filling plus an "NDVI age" feature. The missing composites were requested from NASA AppEEARS on Nov 5, 2026; the features and scores will be rerun once they arrive.
+- Data quality: only **0.9% missing** (clouds); 3 tiny coastal sliver cells never covered; **catalog gap from 2025-06-26 to 2025-11-17** (most of the 2025 fire season). It was first handled with forward-filling plus an "NDVI age" feature, then **filled on Nov 5, 2026** with the missing composites from NASA AppEEARS (same MOD13Q1 + MYD13Q1 product): the maximum NDVI age in 2025 dropped from ~167 to 31 days (a few cloudy cells waiting for the next clear composite, within the all-years maximum of 63).
 - Seasonal cycle: NDVI peaks in **April–May (~0.40)** and is lowest in **August–September (~0.30)**, right when fires peak
 
 **Terrain**
@@ -281,7 +281,76 @@ The random split **doubles PR-AUC** only because test rows have near-copies in t
 
 **MLflow:** experiment `wildfire-validation`, one parent run per scheme (mean and std of every metric + the fold table) and one nested child run per fold.
 
-**Still to do:** scores split by south vs rest and conflict vs normal periods (planned in Day 6) need the saved predictions, so they move to the final test evaluation. The NDVI gap fill (Day 5) will be followed by a rerun of the space + time scheme.
+**Follow-ups (done on Day 11):** the south vs rest and security-event vs normal breakdown is part of the final test. The NDVI gap (Jun–Nov 2025) lies entirely inside the locked 2024+ test period and every feature looks only at the past, so filling it doesn't change any validation or tuning result; only the final test was re-scored.
+
+
+### Optuna tuning + final test (Day 11)
+
+Scripts: [`src/tune.py`](src/tune.py) · [`src/tuning_report.py`](src/tuning_report.py) · [`src/best_params.py`](src/best_params.py) · [`src/confirm_tuned.py`](src/confirm_tuned.py) · [`src/final_test.py`](src/final_test.py) · [`src/train_final.py`](src/train_final.py) · Settings: [`configs/best_params.json`](configs/best_params.json)
+
+**Search setup**
+- **Scored on Day 10's 6 walk-forward time folds** (test years 2018–2023), mean PR-AUC as the objective; recall@top5% and per-fold scores stored on every trial. 2024+ never touched.
+- **10 settings searched** with TPE: learning rate, tree size, rows per leaf, feature/row sampling, L1/L2 penalties, minimum split gain, number of trees, and `weight_power`: fire weight = (non-fires / fires) ^ power, so 0 = no weighting and 0.5 = Day 9's square root. One number covers the whole Day 9 weighting ablation.
+- **No early stopping on the test year** (that would leak); the tree count is tuned instead.
+- **Day 9 settings enqueued as trial 0**, reproducing Day 10's time-scheme score exactly (0.0187), so every trial is compared to a verified baseline.
+- **Median pruning** after 3 of 6 folds, **resumable SQLite study** (`optuna.db`), every trial logged to MLflow (`wildfire-tuning`) through a sync that never logs a trial twice.
+- **70 trials** (53 complete, 17 pruned). The search was extended from 50 to 70 because the best trial at 50 was the last one; the extra 20 improved it by only 1%, so it had levelled off.
+
+![Optimization history](reports/figures/11_optuna_history.png)
+![Parameter importance](reports/figures/11_param_importance.png)
+
+**What won:** the top 10 trials agree: almost **no fire weighting** (power 0.007–0.11), **heavy regularization** (3,100–4,800 rows per leaf), small learning rate (0.011–0.017) and only 300–450 trees. The model does best when forced to learn broad patterns. The best `min_child_samples` (4,824) sits near the top of the range (5,000), but scores are flat across 3,100–4,800, so a wider search would add little.
+
+**Did tuning really help?** Three checks, each harder than the last:
+
+| Check | Day 9 settings | Tuned | Verdict |
+|---|---|---|---|
+| Time folds (used for tuning) | 23.3% recall@top5% | 25.9% | wins 6/6 years (PR-AUC 5/6) |
+| Space + time (unseen regions + future) | 21.0% | **24.5%** | **wins 6/6 years** |
+| **Final test 2024+ (opened once)** | 28.9% | **30.7%** | ~24 more fires caught of 1,377 |
+
+**Final test (train 2012–2023, test Jan 2024 – Oct 2026)**
+
+| Model | PR-AUC | Lift | ROC-AUC | Recall@top5% | Precision@top5% | Brier skill |
+|---|---|---|---|---|---|---|
+| Day 9 settings | **0.053** | **19.4×** | 0.873 | 28.9% | 1.61% | −1.85 |
+| **Tuned (official)** | 0.049 | 17.9× | **0.878** | **30.7%** | **1.70%** | **+0.02** |
+
+- **Tuning improved the part of the ranking the map uses** (the daily top 5%), in 7 of 8 groups below.
+- **PR-AUC fell 8%**, concentrated in 2024 and 2026, when fires came in persistent bursts. Day 9's fire weighting pushes cells that are already burning to the extreme top, which PR-AUC rewards. The tuned model was chosen *before* the test set was opened, on the product's metric, so it stays the official model. Picking a model by its test score would turn the test into another validation set.
+- **Calibration fixed:** dropping the fire weighting moved Brier skill from −1.85 to slightly positive, so the raw scores are no longer inflated probabilities.
+- **Test scores are higher than cross-validation** because the model trained on 12 years and the 2024 bursts are easier to predict.
+
+**Breakdown** (recall = share of a group's fires inside Lebanon's top 5% of cells each day, one national ranking):
+
+| Group | Fires | Day 9 | Tuned |
+|---|---|---|---|
+| South (below 33.35°N, 64 cells) | 579 | 36.8% | **39.7%** |
+| Rest of Lebanon | 798 | 23.2% | **24.1%** |
+| Security-event period (Jan 1 – Nov 27, 2024) | 685 | 28.5% | **31.2%** |
+| Outside that period | 692 | 29.3% | **30.1%** |
+| 2024 | 701 | 29.0% | **31.2%** |
+| 2025 | 354 | 22.6% | **25.1%** |
+| 2026 (to Oct 28) | 322 | **35.7%** | 35.4% |
+
+- **The south is easier:** its fires come in bursts that the recent-fire features catch. Scattered, weather-driven fires in the rest of Lebanon are harder.
+- **The score isn't carried by the 2024 events:** recall is about the same inside and outside that period.
+- **2025 is the weakest year, and not because of missing data:** it stays the weakest with the real NDVI filled in (see below).
+
+**NDVI gap fill (AppEEARS):** the final test was first run with forward-filled NDVI for Jun–Nov 2025. After the missing composites were filled from NASA AppEEARS, it was re-scored with the **same frozen settings** (nothing re-tuned):
+
+| | Before fill (forward-filled) | After fill (real NDVI) |
+|---|---|---|
+| Tuned, all 2024+ | 30.8% recall@top5% | 30.7% |
+| Tuned, 2025 | 25.7% | 25.1% |
+| Day 9 settings, 2025 | 21.5% | 22.6% |
+| 2024 (both models) | unchanged | unchanged |
+
+- **The fill barely moved the scores** (±1 point in 2025, ~2 fires overall). The NDVI-age feature had already told the model when vegetation data was stale, so forward-fill was a safe stopgap.
+- **2024 is unchanged,** as expected: every feature looks only at the past, so 2025 data can't change earlier rows. For the same reason the Day 10 validation and the whole Optuna search (2012–2023) are unaffected.
+- **Why it still matters:** the daily pipeline and live map (Days 15–16) must never run on months-old vegetation data.
+
+**Production model:** retrained with the tuned settings on all labeled data with the filled NDVI (Jan 2012 – Oct 2026, 2.6M rows, 5,313 fires), saved as `models/lgbm_tuned.txt` + `models/model_meta.json` (feature order, categorical columns, training range, test scores), reload-checked, and registered in the MLflow Model Registry as **`lebanon-wildfire-lgbm` v2** (v1 was the same recipe on forward-filled NDVI).
 
 
 ## Scripts
@@ -300,6 +369,7 @@ The random split **doubles PR-AUC** only because test rows have near-copies in t
 | `src/combine_weather.py` | Merges the batches into one weather table per cell per day |
 | `src/check_weather.py` | Monthly climate summary + coast vs inland check chart |
 | `src/ndvi.py` | Downloads MODIS NDVI for every date and saves per-cell means (parallel, resumable) |
+| `src/ndvi_appeears.py` | Turns the NASA AppEEARS GeoTIFFs for the Jun–Nov 2025 catalog gap into per-cell NDVI files, the same format as `ndvi.py` |
 | `src/combine_ndvi.py` | Combines the NDVI files, adds `available_date` and runs date/gap checks |
 | `src/terrain.py` | Downloads the 90 m DEM, computes slope/aspect and saves per-cell terrain features |
 | `src/check_day5.py` | Maps of NDVI, elevation and steep south-facing share + NDVI seasonal cycle |
@@ -310,6 +380,12 @@ The random split **doubles PR-AUC** only because test rows have near-copies in t
 | `src/validate.py` | Random-split leak demo + time, spatial and space-time validation folds, MLflow logging; `python src\validate.py all` |
 | `src/compare_validation.py` | Mean ± std table and per-fold PR-AUC chart for the three schemes |
 | `src/save_folds.py` | Saves the official cell → fold table and `validation_config.json` for Day 11 |
+| `src/tune.py` | Optuna search on the time folds: pruning, resumable SQLite study, MLflow logging; `python src\tune.py 70` |
+| `src/tuning_report.py` | Optimization-history and importance charts, top-10 trials, tuned vs Day 9 per year |
+| `src/best_params.py` | Saves the winning settings to `configs/best_params.json` and loads them for later scripts |
+| `src/confirm_tuned.py` | Reruns the strict space + time scheme with the tuned settings |
+| `src/final_test.py` | One-time 2024+ test of both models, south / security-event / per-year breakdown, saves test predictions |
+| `src/train_final.py` | Trains the production model on all data, saves it to `models/` and registers it in MLflow |
 | `tests/test_features.py` | pytest checks: future-leakage test, label correctness, completeness, NDVI timing, feature list |
 | `notebooks/06_eda.ipynb` | Exploratory data analysis: target, hotspots, timing, location, conflict shift, terrain, NDVI, weather |
 | `notebooks/07_features_check.ipynb` | Missing values per feature and feature lift charts |
@@ -325,16 +401,23 @@ The random split **doubles PR-AUC** only because test rows have near-copies in t
 7. `python src\combine_weather.py`
 8. `python src\check_weather.py`
 9. `python src\ndvi.py` *(rerun until no dates fail)*
-10. `python src\combine_ndvi.py`
-11. `python src\terrain.py`
-12. `python src\check_day5.py`
-13. `python src\check_data.py`
-14. Open `notebooks\06_eda.ipynb` and **Run All**
-15. `python src\features.py`
-16. `python -m pytest -v`
-17. Open `notebooks\07_features_check.ipynb` and **Run All**
-18. `python src\train_baseline.py`
-19. `python src\train_lgbm.py`
-20. `python src\validate.py all`
-21. `python src\compare_validation.py`
-22. `python src\save_folds.py`
+10. `python src\ndvi_appeears.py` *(after downloading the AppEEARS files for the 2025 gap)*
+11. `python src\combine_ndvi.py`
+12. `python src\terrain.py`
+13. `python src\check_day5.py`
+14. `python src\check_data.py`
+15. Open `notebooks\06_eda.ipynb` and **Run All**
+16. `python src\features.py`
+17. `python -m pytest -v`
+18. Open `notebooks\07_features_check.ipynb` and **Run All**
+19. `python src\train_baseline.py`
+20. `python src\train_lgbm.py`
+21. `python src\validate.py all`
+22. `python src\compare_validation.py`
+23. `python src\save_folds.py`
+24. `python src\tune.py 70` *(resumable: rerun the same command after a stop)*
+25. `python src\tuning_report.py`
+26. `python src\best_params.py`
+27. `python src\confirm_tuned.py`
+28. `python src\final_test.py`
+29. `python src\train_final.py`

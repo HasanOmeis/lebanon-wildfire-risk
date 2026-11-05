@@ -4,7 +4,7 @@ import pandas as pd  # tables
 
 RAW_DIR = Path("data/raw/ndvi")  # folder with one file per date
 OUT_PATH = Path("data/processed/ndvi.parquet")  # the combined table we'll use from now on
-EXPECTED_DATES = 663  # number of dates the search found
+EXPECTED_DATES = 680  # 663 from the online catalog + 17 filled from NASA AppEEARS (2025 gap)
 AVAILABILITY_LAG_DAYS = 3  # NASA publishes a composite ~2 days after it ends; 3 to be safe
 
 files = sorted(RAW_DIR.glob("ndvi_*.parquet"))  # list every per-date file, in date order
@@ -21,12 +21,15 @@ dates = pd.Series(sorted(ndvi["start_date"].unique()))  # unique start dates in 
 gaps = dates.diff().dt.days.value_counts().sort_index().to_dict()  # days between one date and the next, counted
 print("Gaps between dates (days -> count):", gaps)  # check 3: mostly 8; a few odd ones around New Year are normal
 
-print("Rows with no NDVI (clouds/gaps):", f"{ndvi['ndvi'].isna().mean():.1%}")  # check 4: share of missing values
+d2025 = dates[dates.dt.year == 2025]  # only the 2025 dates
+print("Largest gap in 2025 (days):", int(d2025.diff().dt.days.max()))  # check 4: should now be 8 (was ~144 before the fill)
+
+print("Rows with no NDVI (clouds/gaps):", f"{ndvi['ndvi'].isna().mean():.1%}")  # check 5: share of missing values
 empty_cells = ndvi.groupby("cell_id")["ndvi"].apply(lambda s: s.isna().all())  # True for cells that never had a value
 print("Cells never covered:", list(empty_cells[empty_cells].index))  # expect the 3 tiny sliver cells
 print("Satellite rows:", ndvi["satellite"].value_counts().to_dict())  # Terra and Aqua should be about equal
 
 OUT_PATH.parent.mkdir(parents=True, exist_ok=True)  # make sure data/processed exists
 ndvi.to_parquet(OUT_PATH, index=False)  # save the combined table
-print("Saved:", OUT_PATH, "| shape:", ndvi.shape)  # expect about 663 x 488 = 323,544 rows, 7 columns
+print("Saved:", OUT_PATH, "| shape:", ndvi.shape)  # expect about 680 x 488 = 331,840 rows, 7 columns
 print("Date range:", ndvi["start_date"].min().date(), "to", ndvi["start_date"].max().date())  # first and last composite
