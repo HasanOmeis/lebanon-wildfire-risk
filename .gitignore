@@ -53,3 +53,7 @@ mlflow.db
 mlruns/
 !reports/baseline_results.csv
 !reports/model_results.csv
+# Day 10 validation results shown in the README
+!reports/validation_*.csv
+!reports/validation_config.json
+!reports/validation_comparison.png

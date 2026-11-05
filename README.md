@@ -4,7 +4,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 
 ## Project Status
 
-🚧 **In progress — Day 9 of 18 complete**
+🚧 **In progress — Day 10 of 18 complete**
 
 | Day | Task | Status |
 |----|------|--------|
@@ -17,8 +17,8 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 | 7 | Feature engineering | ✅ Done |
 | 8 | Baseline model + MLflow | ✅ Done |
 | 9 | LightGBM model |  ✅ Done |
-| 10 | Spatial/time validation | ⏳ Next |
-| 11 | Optuna tuning | ⬜ |
+| 10 | Spatial/time validation | ✅ Done |
+| 11 | Optuna tuning | ⏳ Next |
 | 12 | SHAP explainability | ⬜ |
 | 13 | FastAPI service | ⬜ |
 | 14 | Docker | ⬜ |
@@ -80,7 +80,7 @@ Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · matplot
 - Reprocessed duplicate images are removed (newest version kept per date and tile)
 - **Parallel, resumable download:** a thread pool processes several dates at once; each date is saved as its own file and finished dates are skipped on rerun, so crashes and expired download links cost nothing
 - **Leakage guard:** every value gets an `available_date` = composite end date + 3 days (NASA's processing lag), so the model never uses vegetation data before it actually existed
-- Data quality: only **0.9% missing** (clouds); 3 tiny coastal sliver cells never covered; **catalog gap from 2025-06-26 to 2025-11-17** (most of the 2025 fire season). It is handled for now with forward-filling plus an "NDVI age" feature, and will be filled from NASA AppEEARS before validation.
+- Data quality: only **0.9% missing** (clouds); 3 tiny coastal sliver cells never covered; **catalog gap from 2025-06-26 to 2025-11-17** (most of the 2025 fire season). It is handled with forward-filling plus an "NDVI age" feature. The missing composites were requested from NASA AppEEARS on Nov 5, 2026; the features and scores will be rerun once they arrive.
 - Seasonal cycle: NDVI peaks in **April–May (~0.40)** and is lowest in **August–September (~0.30)**, right when fires peak
 
 **Terrain**
@@ -231,6 +231,58 @@ Same split, same rows and the same scoring function as Day 8 (imported, not copi
 
 **MLflow:** logged to the same `wildfire-baseline` experiment, tagged `stage=lightgbm`, with all parameters, best iteration, metrics, PR curve, a feature-importance chart and the model.
 
+### Spatial + time validation (Day 10)
+
+Scripts: [`src/validate.py`](src/validate.py) · [`src/compare_validation.py`](src/compare_validation.py) · [`src/save_folds.py`](src/save_folds.py) · Results: [`reports/validation_summary.csv`](reports/validation_summary.csv)
+
+One validation window is one roll of the dice, and wildfire rows are not independent: a cell today looks like the same cell tomorrow, and neighbouring cells share the same weather. Day 10 measures how much the score depends on **how** the data is split.
+
+**1. Why a random split lies.** The same LightGBM (Day 9 settings, a fixed 500 trees, no early stopping on the test part) trained twice:
+
+| Split | PR-AUC | Lift | ROC-AUC |
+|---|---|---|---|
+| Random 80/20 rows (all years mixed) | 0.0313 | 15.7× | 0.876 |
+| Time: train < 2022, test 2022–23 | 0.0147 | 8.8× | 0.859 |
+
+The random split **doubles PR-AUC** only because test rows have near-copies in training (the same cell a day earlier, the neighbour on the same day). Recall@top5% isn't compared here: a random split leaves only ~20% of each day's cells in the test set, so its daily ranking isn't comparable.
+
+**2. Three honest schemes**, all on 2012–2023. 2024+ is the locked final test set and never touched:
+
+- **Time (walk-forward):** 6 folds; train on every year before, test on one year (2018 … 2023). A **1-day gap** drops Dec 31 from training, since its label is the first test day.
+- **Spatial:** Lebanon cut into **32 blocks of 25 × 25 km** (~15 cells each), randomly spread over 5 folds. Whole blocks are held out, because single held-out cells would leak through their neighbours.
+- **Space + time (strict):** for each test year, 5 models, each trained only on **earlier years in other regions**. Their predictions are stitched back into one full year, so every cell is scored by a model that never saw its region or its future (30 trainings).
+
+**3. Results (mean ± std across folds)**
+
+| Scheme | PR-AUC | Lift | ROC-AUC | Recall@top5% | Precision@top5% |
+|---|---|---|---|---|---|
+| Time | 0.019 ± 0.009 | 9.5 ± 3.5× | 0.852 ± 0.018 | 23.3 ± 6.3% | 0.92% |
+| Spatial | 0.021 ± 0.011 | 12.9 ± 7.2× | 0.852 ± 0.039 | 23.6 ± 7.7%* | 0.83% |
+| **Space + time** | **0.015 ± 0.006** | **7.9 ± 2.1×** | **0.837 ± 0.021** | **21.0 ± 4.6%** | **0.82%** |
+
+\*Spatial folds rank only ~100 cells per day, not 488, so their recall isn't directly comparable.
+
+![Validation comparison](reports/validation_comparison.png)
+
+
+**What it shows**
+- **Year-to-year noise is large:** PR-AUC ranges from 0.006 (2018) to 0.028 (2023). Day 9's single 2022–23 window couldn't separate models that differ by less than this.
+- **More history helps:** the 2018 fold (6 training years) is the weakest; the 2023 fold (11 years) catches **35%** of fires in the top 5%. That's an argument for retraining as new years arrive (Day 15).
+- **Unseen regions cost ~2 recall points:** part of what the model learns is local (e.g. regular agricultural burning in specific places). The regions holding the most fires are the hardest to predict when held out (ROC-AUC 0.80–0.83).
+- **Headline number:** in regions and years the model never trained on, **21% of next-day fires fall in the 5% of cells flagged each day**, about 8× better than random.
+- **Alert precision:** ~0.9% of flagged cells burn the next day, **~5× the average cell**. With ~24 flagged cells per day, about one burns every 4–5 days.
+
+**4. The probabilities are off (calibration).** Brier skill score ≈ **−2** in every scheme: the probabilities are worse than always guessing the average fire rate, even though the **ranking** is good. That's the side effect of `scale_pos_weight ≈ 23`, which pushes every score up. The model is fine for "which cells are riskiest", but its raw scores must not be shown as "% chance of fire". They will be calibrated, or shown as risk levels (top 1% / 5% / 20%), before the API and map.
+
+**5. Decision: the official validation setup** ([`reports/validation_config.json`](reports/validation_config.json))
+- **Tune on the time folds** (6 trainings per Optuna trial, ~2 min) and **report on space + time** (30 trainings, ~7 min). Tuning on the strict scheme would cost ~5 hours for 40 trials.
+- Cell → spatial-fold assignments are saved to `data/processed/cell_folds.parquet`, so Day 11 uses exactly the same regions.
+- 2024+ stays locked until the final test.
+
+**MLflow:** experiment `wildfire-validation`, one parent run per scheme (mean and std of every metric + the fold table) and one nested child run per fold.
+
+**Still to do:** scores split by south vs rest and conflict vs normal periods (planned in Day 6) need the saved predictions, so they move to the final test evaluation. The NDVI gap fill (Day 5) will be followed by a rerun of the space + time scheme.
+
 
 ## Scripts
 
@@ -255,6 +307,9 @@ Same split, same rows and the same scoring function as Day 8 (imported, not copi
 | `src/features.py` | Builds the leakage-safe feature table (`features.parquet`) and the feature list (`feature_columns.json`) |
 | `src/train_baseline.py` | Time split, naive baselines, logistic regression, MLflow logging; saves `reports/baseline_results.csv` |
 | `src/train_lgbm.py` | LightGBM with early stopping, same split + metrics as the baseline, MLflow logging; saves `reports/model_results.csv` |
+| `src/validate.py` | Random-split leak demo + time, spatial and space-time validation folds, MLflow logging; `python src\validate.py all` |
+| `src/compare_validation.py` | Mean ± std table and per-fold PR-AUC chart for the three schemes |
+| `src/save_folds.py` | Saves the official cell → fold table and `validation_config.json` for Day 11 |
 | `tests/test_features.py` | pytest checks: future-leakage test, label correctness, completeness, NDVI timing, feature list |
 | `notebooks/06_eda.ipynb` | Exploratory data analysis: target, hotspots, timing, location, conflict shift, terrain, NDVI, weather |
 | `notebooks/07_features_check.ipynb` | Missing values per feature and feature lift charts |
@@ -280,3 +335,6 @@ Same split, same rows and the same scoring function as Day 8 (imported, not copi
 17. Open `notebooks\07_features_check.ipynb` and **Run All**
 18. `python src\train_baseline.py`
 19. `python src\train_lgbm.py`
+20. `python src\validate.py all`
+21. `python src\compare_validation.py`
+22. `python src\save_folds.py`
