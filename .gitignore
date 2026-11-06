@@ -61,3 +61,6 @@ mlruns/
 !reports/tuning_*.csv
 !reports/final_test*.csv
 !reports/figures/1*_*.png
+# Day 12 SHAP results shown in the README
+!reports/shap_importance.csv
+!reports/figures/shap_*.png

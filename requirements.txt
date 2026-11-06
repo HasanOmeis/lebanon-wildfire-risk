@@ -177,3 +177,4 @@ xarray==2026.9.0
 xyzservices==2026.9.1
 yarl==1.25.1
 zipp==4.1.2
+shap   # model explainability (Day 12)

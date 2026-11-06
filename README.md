@@ -4,7 +4,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 
 ## Project Status
 
-🚧 **In progress — Day 11 of 18 complete**
+🚧 **In progress — Day 12 of 18 complete**
 
 | Day | Task | Status |
 |----|------|--------|
@@ -19,8 +19,8 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 | 9 | LightGBM model |  ✅ Done |
 | 10 | Spatial/time validation | ✅ Done |
 | 11 | Optuna tuning | ✅ Done |
-| 12 | SHAP explainability | ⏳ Next |
-| 13 | FastAPI service | ⬜ |
+| 12 | SHAP explainability | ✅ Done |
+| 13 | FastAPI service | ⏳ Next |
 | 14 | Docker | ⬜ |
 | 15 | Daily pipeline | ⬜ |
 | 16 | Streamlit live map | ⬜ |
@@ -353,6 +353,61 @@ Scripts: [`src/tune.py`](src/tune.py) · [`src/tuning_report.py`](src/tuning_rep
 **Production model:** retrained with the tuned settings on all labeled data with the filled NDVI (Jan 2012 – Oct 2026, 2.6M rows, 5,313 fires), saved as `models/lgbm_tuned.txt` + `models/model_meta.json` (feature order, categorical columns, training range, test scores), reload-checked, and registered in the MLflow Model Registry as **`lebanon-wildfire-lgbm` v2** (v1 was the same recipe on forward-filled NDVI).
 
 
+### SHAP explainability (Day 12)
+
+Scripts: [`src/explain.py`](src/explain.py) · [`src/shap_plots.py`](src/shap_plots.py) · Ranking: [`reports/shap_importance.csv`](reports/shap_importance.csv)
+
+**Setup**
+- **Model explained:** the production model (`models/lgbm_tuned.txt`, registry v2), the one the API and map will use.
+- **Rows explained:** 4,377 cell-days from Jan 2024 – Oct 2026: all 1,377 fire days plus 3,000 random no-fire days, so both outcomes are well covered.
+- **Exact values:** `TreeExplainer` on the LightGBM model. Base value + all feature pushes rebuilds every raw score (max error 2e-14).
+- **Categorical fix:** `month` and `day_of_week` were trained as pandas categories, so `prepare_X()` restores the exact training categories before every prediction. The API reuses it.
+- Plots, the importance table, top-10 SHAP metrics and tags are logged to the model's MLflow run (artifacts → `shap/`).
+
+![SHAP importance](reports/figures/shap_bar.png)
+![SHAP beeswarm](reports/figures/shap_beeswarm.png)
+
+**What drives next-day fire risk**
+- **Fire history matters most:** cells that burn often (`cell_fire_rate`) or burned recently (`days_since_fire`) stay risky.
+- **Terrain and fuel come next:** lower and middle elevations and greener cells (more fuel) burn more.
+- **Heat and dry air raise risk** (max temperature, 7-day heat, VPD, days without rain); **moisture lowers it** (humidity, recent rain).
+
+**Sanity checks**
+
+Spearman correlation between each feature's value and its SHAP push (+ = higher value raises risk):
+
+| Feature | Correlation | Expected? |
+|---|---|---|
+| `tmax` / `tmax_mean_7d` | +0.90 / +0.87 | ✅ hotter = riskier |
+| `vpd_max` | +0.84 | ✅ drier air = riskier |
+| `dry_streak` | +0.80 | ✅ longer dry spell = riskier |
+| `rh_min` | −0.86 | ✅ humid = safer |
+| `precip` / `precip_sum_30d` | −0.75 / −0.71 | ✅ rain = safer |
+| `cell_fire_rate` | +0.94 | ✅ fire-prone places = riskier |
+| `days_since_fire` | −0.96 | ✅ recently burned = riskier |
+| `ndvi` | +0.32 | ✅ more fuel = riskier (Lebanon's fires are in dry-summer forest and scrub) |
+| `elev_mean` | −0.86 | ✅ cold high mountains burn less |
+| `wind_max` | −0.23 | ⚠️ see below |
+
+- **No leakage in the top feature:** `cell_fire_rate` was rebuilt from scratch as an expanding mean (past days and today only) for 5 random cells and matched the saved feature (max difference 2e-10).
+- **Day 7 follow-up:** `south_steep_frac` ranks outside the top 15. With elevation in the model, the steep-slope signal adds little: the steepest cells are high, rocky and low on fuel, and `elev_mean` (#3) carries that effect.
+- **Wind surprise:** high wind slightly *lowers* predicted risk. In Lebanon the windiest days are mostly rainy winter storms; the hot, dry eastern-wind fire days are a small share of windy days. Wind's effect is small (not in the top 15). Future work: a wind-direction feature, or wind measured only on dry days.
+
+**How each feature pushes risk** (x = feature value, y = SHAP push, above 0 raises risk)
+
+![VPD dependence](reports/figures/shap_dep_vpd_max.png)
+![Days since fire dependence](reports/figures/shap_dep_days_since_fire.png)
+
+**One prediction, explained:** the riskiest real fire day in the sample (cell 10, 24 Oct 2024, 68% risk), from the base value to the final score:
+
+![SHAP waterfall](reports/figures/shap_waterfall_high.png)
+
+**Top-3 reasons for every cell:** `top_reasons()` in `src/explain.py` returns each cell's risk plus its 3 strongest drivers in plain English (for example *"days since the last fire here = 3 → raises risk"*). It uses LightGBM's built-in `pred_contrib=True`, which matches SHAP exactly (max difference 0.0), so the API doesn't need the `shap` package.
+
+**Notes**
+- **SHAP explains the model, not its accuracy.** The production model was trained on all years, including 2024–2026, so these rows are not unseen data for it. The honest scores are the Day 11 final test (model trained only on 2012–2023).
+- **Raw risks look small** (fires happened on cell-days scored 0.2–0.7%) because fires are rare: the base risk is ~0.07%, so 0.7% is 10× normal. The map (Day 16) will show risk classes relative to normal, not raw percentages.
+
 ## Scripts
 
 | Script | What it does |
@@ -386,6 +441,8 @@ Scripts: [`src/tune.py`](src/tune.py) · [`src/tuning_report.py`](src/tuning_rep
 | `src/confirm_tuned.py` | Reruns the strict space + time scheme with the tuned settings |
 | `src/final_test.py` | One-time 2024+ test of both models, south / security-event / per-year breakdown, saves test predictions |
 | `src/train_final.py` | Trains the production model on all data, saves it to `models/` and registers it in MLflow |
+| `src/explain.py` | SHAP values on a 2024–2026 sample, additivity check, `prepare_X()` category fix and `top_reasons()` helper for the API |
+| `src/shap_plots.py` | SHAP importance table, bar, beeswarm, dependence and waterfall plots; logs them to the model's MLflow run |
 | `tests/test_features.py` | pytest checks: future-leakage test, label correctness, completeness, NDVI timing, feature list |
 | `notebooks/06_eda.ipynb` | Exploratory data analysis: target, hotspots, timing, location, conflict shift, terrain, NDVI, weather |
 | `notebooks/07_features_check.ipynb` | Missing values per feature and feature lift charts |
@@ -421,3 +478,5 @@ Scripts: [`src/tune.py`](src/tune.py) · [`src/tuning_report.py`](src/tuning_rep
 27. `python src\confirm_tuned.py`
 28. `python src\final_test.py`
 29. `python src\train_final.py`
+30. `python src\explain.py`
+31. `python src\shap_plots.py`
