@@ -4,7 +4,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 
 ## Project Status
 
-🚧 **In progress — Day 13 of 18 complete**
+🚧 **In progress — Day 14 of 18 complete**
 
 | Day | Task | Status |
 |----|------|--------|
@@ -21,8 +21,8 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 | 11 | Optuna tuning | ✅ Done |
 | 12 | SHAP explainability | ✅ Done |
 | 13 | FastAPI service | ✅ Done |
-| 14 | Docker | ⏳ Next |
-| 15 | Daily pipeline | ⬜ |
+| 14 | Docker | ✅ Done |
+| 15 | Daily pipeline | ⏳ Next |
 | 16 | Streamlit live map | ⬜ |
 | 17 | Deploy | ⬜ |
 | 18 | README + showcase | ⬜ |
@@ -43,6 +43,7 @@ Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · matplot
 3. `pip install -r requirements.txt`
 4. Copy `.env.example` to `.env` and add your NASA FIRMS MAP_KEY
 5. `python src\check_setup.py`
+6. *(For the container)* install Docker Desktop with the WSL 2 engine
 
 ## What's Built So Far
 
@@ -479,6 +480,59 @@ Then open http://127.0.0.1:8000/docs, or send real rows with `python src\call_ap
 - **"Extreme" often means "already burning".** Most extreme cells have a fire today; "high" and "moderate" cells are where the model reads risk from weather, vegetation and history. The map should make that difference clear.
 - **The API serves features prepared offline.** Until the daily pipeline (Day 15) appends a new day each morning, the newest map is the last day in the feature table.
 
+### Docker (Day 14)
+
+The API now ships as a Docker image, so it runs the same way on any machine: same Python, same library versions, same model. One command starts it, and one script checks it end to end.
+
+```powershell
+docker compose up -d --build        # build the image and start the API at http://localhost:8000
+docker compose ps                   # wait for STATUS "healthy"
+python scripts\smoke_test.py        # 11 end-to-end checks against the running container
+docker compose down                 # stop and remove the container
+```
+
+Without Compose:
+
+```powershell
+docker build -t lebanon-wildfire-api:1.0.0 -t lebanon-wildfire-api:latest .
+docker run -d --name wildfire-api -p 8000:8000 lebanon-wildfire-api:1.0.0
+```
+
+**Measured on the running container**
+
+| | |
+|---|---|
+| Build context | 11 files, 7 MB (allowlist `.dockerignore`) |
+| Image size | 878 MB on disk, 206 MB compressed |
+| Of which: Python packages | 530 MB (LightGBM, pandas, pyarrow, scipy, numpy) |
+| Of which: model + data + code | 7.3 MB |
+| Memory at runtime | ~340 MB, tested under a 512 MB cap |
+| Rebuild after a code change | seconds (dependency layers cached) |
+| Shutdown | clean, 0.8 s |
+| Smoke test | 11/11 checks pass |
+
+**Design choices**
+- **Small runtime package list.** `requirements-api.txt` has only what the API imports, pinned to the exact versions the model was trained and tested with (LightGBM 4.7.0, pandas 3.1.0, numpy 2.5.4). Training tools (geopandas, MLflow, Optuna, SHAP, Jupyter) stay out of the image.
+- **Allowlist `.dockerignore`.** It ignores everything, then lets back in only `src/api/`, `models/`, `data/serving/` and `requirements-api.txt`. New data folders can never leak into the image by accident.
+- **Layer order for fast rebuilds.** System library and pip install come first; code, model and data last. Changing `main.py` rebuilds in seconds instead of reinstalling pandas.
+- **`python:3.12-slim` + `libgomp1`.** Same Python as the venv; `libgomp1` is the OpenMP library LightGBM needs at runtime.
+- **Non-root user.** The API runs as `appuser`; the code and model files belong to root and are read-only for it.
+- **Built-in health check.** Docker calls `/health` every 30 s and marks the container healthy or unhealthy; Compose restarts it after a crash (`restart: unless-stopped`).
+- **Clean shutdown.** `exec` makes uvicorn process 1, so `docker stop` reaches it directly and the lifespan shutdown runs.
+- **Ready for hosting.** The port comes from a `PORT` variable, uvicorn's duplicate access log is off (the app logs every request itself), and logs use UTC.
+- **Tested under a free-plan memory limit.** Compose caps the container at 512 MB, the size of many free hosting plans, and the whole smoke test (including a 488-cell batch) passes inside it.
+
+**Smoke test** (`scripts/smoke_test.py`, works against any URL: `python scripts\smoke_test.py https://...`):
+- `/health` is ok and the container's model has the same 52 features as the local model file
+- `/risk/latest` returns all 488 cells, the level counts add up, and the timing header is present
+- `/explain/464` returns 3 reasons, and `/predict` on the same raw features gives the identical risk
+- `/predict/batch` scores all 488 cells in one call
+- a wrong cell or date gives 404, a misspelled feature gives 422
+
+**Notes**
+- **The model and serving data are not in Git** (`models/*` and `data/serving/` are ignored). The image is built from the local project folder, which has them. Deploying from GitHub (Day 17) needs a way to deliver these files.
+- **First builds are slow on a slow connection.** The base image and Python packages are about 200 MB to download once; `PIP_DEFAULT_TIMEOUT=120` and `PIP_RETRIES=10` in the Dockerfile stop pip from giving up too early. After that, everything is cached.
+
 ## Scripts
 
 | Script | What it does |
@@ -518,6 +572,11 @@ Then open http://127.0.0.1:8000/docs, or send real rows with `python src\call_ap
 | `src/export_serving.py` | Writes the small serving files the API reads: `data/serving/recent_features.parquet` and `grid.geojson` |
 | `src/api/` | FastAPI service: `schemas.py` (request/response shapes), `predictor.py` (model, levels, reasons), `store.py` (serving data), `main.py` (endpoints, logging, errors) |
 | `src/call_api.py` | Sends real feature rows to the running API: `python src\call_api.py predict` or `batch [YYYY-MM-DD]` |
+| `Dockerfile` | Builds the API image: Python 3.12-slim, `libgomp1`, pinned packages, non-root user, health check, `PORT` variable |
+| `.dockerignore` | Allowlist: only `src/api/`, `models/`, `data/serving/` and `requirements-api.txt` reach the build |
+| `requirements-api.txt` | Runtime packages for the container only, pinned to the training versions |
+| `docker-compose.yml` | Runs the API service with port 8000, auto-restart and a 512 MB memory cap |
+| `scripts/smoke_test.py` | 11 end-to-end checks against a running API, local or deployed: `python scripts\smoke_test.py [URL]` |
 | `tests/test_features.py` | pytest checks: future-leakage test, label correctness, completeness, NDVI timing, feature list |
 | `tests/test_api.py` | API tests with FastAPI's TestClient: every endpoint, error codes, route consistency, level boundaries |
 | `tests/test_labels.py` | Every model feature has a plain-English label, and no label is stale |
@@ -562,3 +621,5 @@ Then open http://127.0.0.1:8000/docs, or send real rows with `python src\call_ap
 33. `python src\export_serving.py`
 34. `python -m pytest -q`
 35. `uvicorn src.api.main:app --reload` *(then open http://127.0.0.1:8000/docs)*
+36. `docker compose up -d --build` *(the same API in a container)*
+37. `python scripts\smoke_test.py`

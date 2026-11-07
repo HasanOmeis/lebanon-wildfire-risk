@@ -1,0 +1,12 @@
+# Runtime packages for the API container only (training tools live in requirements.txt)  # what this file is for
+# Versions match the .venv the model was trained and tested with                          # why everything is pinned with ==
+
+fastapi==0.162.0           # the web framework the API is built with
+uvicorn[standard]==0.54.0  # the server that runs FastAPI; [standard] adds faster event loop and HTTP parsing
+pydantic==2.14.2           # request/response validation (schemas.py); it pins its own pydantic_core
+
+lightgbm==4.7.0            # loads lgbm_tuned.txt and computes predictions + pred_contrib reasons
+scipy==1.18.1              # required by lightgbm; pinned so the container matches the venv
+numpy==2.5.4               # math arrays used by the predictor
+pandas==3.1.0              # feature tables and read_parquet in store.py
+pyarrow==25.0.1            # the engine pandas uses to read recent_features.parquet
