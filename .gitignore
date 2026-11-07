@@ -64,3 +64,5 @@ mlruns/
 # Day 12 SHAP results shown in the README
 !reports/shap_importance.csv
 !reports/figures/shap_*.png
+# serving files built by src/export_serving.py (rebuilt, not stored)
+data/serving/

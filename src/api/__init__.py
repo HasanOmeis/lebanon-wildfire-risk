@@ -1,0 +1,1 @@
+"""Lebanon wildfire-risk prediction API (FastAPI)."""  # package description; this file also tells Python that src/api is a package

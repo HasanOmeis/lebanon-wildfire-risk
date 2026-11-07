@@ -4,7 +4,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 
 ## Project Status
 
-🚧 **In progress — Day 12 of 18 complete**
+🚧 **In progress — Day 13 of 18 complete**
 
 | Day | Task | Status |
 |----|------|--------|
@@ -20,8 +20,8 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 | 10 | Spatial/time validation | ✅ Done |
 | 11 | Optuna tuning | ✅ Done |
 | 12 | SHAP explainability | ✅ Done |
-| 13 | FastAPI service | ⏳ Next |
-| 14 | Docker | ⬜ |
+| 13 | FastAPI service | ✅ Done |
+| 14 | Docker | ⏳ Next |
 | 15 | Daily pipeline | ⬜ |
 | 16 | Streamlit live map | ⬜ |
 | 17 | Deploy | ⬜ |
@@ -408,6 +408,77 @@ Spearman correlation between each feature's value and its SHAP push (+ = higher 
 - **SHAP explains the model, not its accuracy.** The production model was trained on all years, including 2024–2026, so these rows are not unseen data for it. The honest scores are the Day 11 final test (model trained only on 2012–2023).
 - **Raw risks look small** (fires happened on cell-days scored 0.2–0.7%) because fires are rare: the base risk is ~0.07%, so 0.7% is 10× normal. The map (Day 16) will show risk classes relative to normal, not raw percentages.
 
+### FastAPI service (Day 13)
+
+The tuned model is now a web service: send it features, get back next-day risk, a risk level and the reasons behind it. It loads the model and serving data **once at startup** and scores the whole country (488 cells + GeoJSON) in **~13 ms**.
+
+**Endpoints**
+
+| Method | Path | What it returns |
+|--------|------|-----------------|
+| GET | `/health` | Model file, training end date, feature count, risk cutoffs |
+| POST | `/predict` | Risk + level for one cell-day (`?reasons=true` adds the top 3 SHAP reasons) |
+| POST | `/predict/batch` | The same for up to 5,000 rows in one call (used by the daily pipeline) |
+| GET | `/risk/latest` | Every cell on the newest day as a GeoJSON map, plus counts per level |
+| GET | `/risk/{date}` | The same map for any day in the serving window (last 400 days) |
+| GET | `/explain/{cell_id}` | Why one cell has its risk: top `k` reasons in plain English (`?day=`, `?k=1..10`) |
+
+Interactive docs (Swagger) are built automatically at `/docs`.
+
+**Risk levels instead of raw percentages.** Fires are rare, so raw probabilities are all small and hard to read. Each cell-day is ranked against 2024–2026 instead (`src/risk_levels.py`, saved to `models/risk_levels.json`):
+
+| Level | Share of cell-days | Probability cutoff | Next-day fire rate | vs. low |
+|-------|-------------------|--------------------|--------------------|---------|
+| low | 80% | below 0.32% | 0.05% | 1× |
+| moderate | 15% | 0.32% | 0.58% | ~12× |
+| high | 4% | 1.03% | 1.7% | ~34× |
+| extreme | 1% | 2.66% | 7.6% | ~150× |
+
+**Example:** why was cell 464 (north Lebanon) "extreme" on 29 Oct 2026, in the quiet season?
+
+```bash
+curl "http://127.0.0.1:8000/explain/464?k=3"
+```
+
+```json
+{
+  "cell_id": 464, "date": "2026-10-29", "forecast_for": "2026-10-30",
+  "risk": 0.068063, "level": "extreme",
+  "reasons": [
+    {"label": "days since the last fire here", "value": 0.0, "impact": 1.394, "direction": "raises risk"},
+    {"label": "fire days here this month", "value": 3.0, "impact": 0.747, "direction": "raises risk"},
+    {"label": "how often this area burns", "value": 0.0039, "impact": 0.54, "direction": "raises risk"}
+  ]
+}
+```
+
+It was burning that day. Fires often continue or re-ignite the next day, and the model has learned that persistence.
+
+**Design choices**
+- **Strict inputs.** LightGBM matches columns by position, so the API rebuilds them in the model's own order and rejects missing or unknown feature names (typos) with a clear 422, row by row.
+- **Two layers of validation.** Pydantic checks the shape and types; the predictor checks the names against `model_meta.json`.
+- **Reasons without the `shap` package.** LightGBM's `pred_contrib=True` gives the same values as SHAP (checked on Day 12), which keeps the API light.
+- **Serving files, separate from training data.** `src/export_serving.py` writes `data/serving/recent_features.parquet` (last 400 days, no label: 6 MB instead of the 113 MB training table) and `grid.geojson` (cells in lat/lon). The API doesn't need geopandas.
+- **Safe errors and logging.** Every request is logged with status and time (4xx as warnings). An unexpected crash returns a generic 500 to the caller; the full traceback goes only to the server log. Every answer carries an `X-Process-Time-ms` header.
+- **One prediction, four routes, one answer.** `/predict`, `/predict/batch`, `/risk` and `/explain` are tested to return the identical risk for the same cell-day.
+
+**Tests:** 24 pass (`python -m pytest -q`): happy paths, every error code (404 / 422 / 500), route consistency, level boundaries, logging, and a check that all 52 features have plain-English labels.
+
+**Run it**
+
+```powershell
+python src\risk_levels.py
+python src\export_serving.py
+uvicorn src.api.main:app --reload
+```
+
+Then open http://127.0.0.1:8000/docs, or send real rows with `python src\call_api.py predict` / `python src\call_api.py batch`.
+
+**Notes**
+- **The level fire rates are optimistic.** They were measured with the production model on 2024–2026, which it was trained on. The honest, unseen-data performance is the Day 11 final test. The levels are a readable ranking, not a promise of exact rates.
+- **"Extreme" often means "already burning".** Most extreme cells have a fire today; "high" and "moderate" cells are where the model reads risk from weather, vegetation and history. The map should make that difference clear.
+- **The API serves features prepared offline.** Until the daily pipeline (Day 15) appends a new day each morning, the newest map is the last day in the feature table.
+
 ## Scripts
 
 | Script | What it does |
@@ -443,7 +514,14 @@ Spearman correlation between each feature's value and its SHAP push (+ = higher 
 | `src/train_final.py` | Trains the production model on all data, saves it to `models/` and registers it in MLflow |
 | `src/explain.py` | SHAP values on a 2024–2026 sample, additivity check, `prepare_X()` category fix and `top_reasons()` helper for the API |
 | `src/shap_plots.py` | SHAP importance table, bar, beeswarm, dependence and waterfall plots; logs them to the model's MLflow run |
+| `src/risk_levels.py` | Sets the low / moderate / high / extreme cutoffs from 2024–2026 risk quantiles; saves `models/risk_levels.json` |
+| `src/export_serving.py` | Writes the small serving files the API reads: `data/serving/recent_features.parquet` and `grid.geojson` |
+| `src/api/` | FastAPI service: `schemas.py` (request/response shapes), `predictor.py` (model, levels, reasons), `store.py` (serving data), `main.py` (endpoints, logging, errors) |
+| `src/call_api.py` | Sends real feature rows to the running API: `python src\call_api.py predict` or `batch [YYYY-MM-DD]` |
 | `tests/test_features.py` | pytest checks: future-leakage test, label correctness, completeness, NDVI timing, feature list |
+| `tests/test_api.py` | API tests with FastAPI's TestClient: every endpoint, error codes, route consistency, level boundaries |
+| `tests/test_labels.py` | Every model feature has a plain-English label, and no label is stale |
+| `tests/test_errors.py` | Unexpected errors give a clean 500 without leaking details; requests are logged and timed |
 | `notebooks/06_eda.ipynb` | Exploratory data analysis: target, hotspots, timing, location, conflict shift, terrain, NDVI, weather |
 | `notebooks/07_features_check.ipynb` | Missing values per feature and feature lift charts |
 
@@ -480,3 +558,7 @@ Spearman correlation between each feature's value and its SHAP push (+ = higher 
 29. `python src\train_final.py`
 30. `python src\explain.py`
 31. `python src\shap_plots.py`
+32. `python src\risk_levels.py`
+33. `python src\export_serving.py`
+34. `python -m pytest -q`
+35. `uvicorn src.api.main:app --reload` *(then open http://127.0.0.1:8000/docs)*
