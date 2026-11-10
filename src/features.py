@@ -6,13 +6,13 @@ Label = fire_tomorrow: 1 if the cell has a fire on day t+1, else 0.  # what the 
 LEAKAGE RULE: a feature for day t may only use data available by the end of day t.  # the rule every step follows
 """  # end of the module description
 
+import argparse  # reads optional options from the command line (--end)
 import json  # save the feature-name list as a small text file
 from pathlib import Path  # clean file paths that work on Windows
 
 import geopandas as gpd  # read the grid geometry (needed for neighbors)
 import numpy as np  # math helpers (sin/cos, logs)
 import pandas as pd  # all the table work
-
 
 
 DATA = Path("data/processed")  # folder with all cleaned tables
@@ -45,7 +45,7 @@ def load_fire_days():  # collapse fire detections into one row per cell per fire
 
 
 def build_panel(daily, cell_ids, end_date):  # every cell x every day, with today's fire and tomorrow's label
-    dates = pd.date_range(START_DATE, end_date, freq="D")  # every calendar day from the start to the last fire-data day
+    dates = pd.date_range(START_DATE, end_date, freq="D")  # every calendar day from the start to the panel's last day
     idx = pd.MultiIndex.from_product([cell_ids, dates], names=["cell_id", "date"])  # all cell-day combinations
     panel = pd.DataFrame(index=idx).reset_index()  # turn the combinations into a table with two columns
     panel = panel.merge(daily, on=["cell_id", "date"], how="left")  # attach fire info; days without fire get NaN
@@ -70,6 +70,7 @@ def add_fire_history(panel):  # past-fire features per cell, using day t and ear
     days_seen = panel.groupby("cell_id").cumcount() + 1  # how many days of history the cell has so far
     panel["cell_fire_rate"] = (cum_fires / days_seen).astype("float32")  # the cell's long-run fire frequency, from the past only
     return panel  # the panel with 5 new columns
+
 
 def neighbor_matrix(grid, cell_ids):  # 488 x 488 matrix: 1 where two cells touch (sides or corners)
     shapes = grid[["cell_id", "geometry"]].copy()  # only the ID and the shape
@@ -106,7 +107,7 @@ def add_weather(panel):  # today's weather plus rolling windows, all looking bac
         "et0_fao_evapotranspiration": "et0",  # water the air pulls from the ground (mm)
         "vapour_pressure_deficit_max": "vpd_max",  # how "thirsty" the air is (kPa)
     }  # end of the name map
-    weather = pd.read_parquet(WEATHER_PATH, columns=["cell_id", "date", *rename]).rename(columns=rename)  # load only what we need, with short names
+    weather = pd.read_parquet(WEATHER_PATH, columns=["cell_id", "date", *rename]).rename(columns=rename)  # load only what we need, with short names (the new "source" column is skipped)
     weather["date"] = pd.to_datetime(weather["date"]).dt.normalize()  # same date format as the panel
     weather[list(rename.values())] = weather[list(rename.values())].astype("float32")  # smaller numbers to save memory
     panel = panel.merge(weather, on=["cell_id", "date"], how="left")  # attach weather; days not downloaded yet stay NaN
@@ -149,7 +150,6 @@ def add_weather_anomalies(panel):  # this week's weather minus the cell's normal
     return panel  # the panel with 4 new columns
 
 
-
 def add_ndvi(panel):  # latest published vegetation index, its age, change and anomaly
     ndvi = pd.read_parquet(NDVI_PATH, columns=["cell_id", "ndvi", "valid_frac", "available_date"])  # use Day 5's availability date
     ndvi = ndvi[ndvi["ndvi"].notna() & (ndvi["valid_frac"] >= 0.2)].copy()  # drop cloudy composites (under 20% usable pixels)
@@ -158,7 +158,7 @@ def add_ndvi(panel):  # latest published vegetation index, its age, change and a
     obs = obs.sort_values(["cell_id", "avail_date"])  # each cell's composites in time order
     obs["month"] = obs["avail_date"].dt.month  # month of each composite
     obs["ndvi_clim"] = obs.groupby(["cell_id", "month"])["ndvi"].transform(lambda s: s.shift().expanding().mean())  # this cell's average for this month in PAST years only
-    
+
     panel["date"] = panel["date"].astype("datetime64[ns]")  # same date precision as avail_date, which merge_asof requires
     panel = panel.sort_values("date")  # merge_asof needs both tables sorted by the time key
     obs = obs.sort_values("avail_date")  # same for the NDVI table
@@ -172,11 +172,12 @@ def add_ndvi(panel):  # latest published vegetation index, its age, change and a
     )  # end of the as-of join
     panel = panel.sort_values(["cell_id", "date"]).reset_index(drop=True)  # back to cell, date order (other steps rely on it)
 
-    panel["ndvi_age_days"] = (panel["date"] - panel["avail_date"]).dt.days.astype("float32")  # how old the NDVI value is (large in the 2025 gap)
+    panel["ndvi_age_days"] = (panel["date"] - panel["avail_date"]).dt.days.astype("float32")  # how old the NDVI value is (grows between composites)
     panel["ndvi_anomaly"] = (panel["ndvi"] - panel["ndvi_clim"]).astype("float32")  # greener (+) or browner (-) than this cell usually is in this month
     panel["ndvi_change_30d"] = (panel["ndvi"] - panel.groupby("cell_id")["ndvi"].shift(30)).astype("float32")  # how fast vegetation is drying out
     panel["ndvi"] = panel["ndvi"].astype("float32")  # smaller type
     return panel.drop(columns=["avail_date", "ndvi_clim"])  # remove helper columns, keep 4 NDVI features
+
 
 def add_static_and_calendar(panel, grid):  # per-cell terrain + land share, and season features
     terrain = pd.read_parquet(TERRAIN_PATH)  # 8 terrain columns per cell
@@ -193,6 +194,7 @@ def add_static_and_calendar(panel, grid):  # per-cell terrain + land share, and 
     panel["day_of_week"] = panel["date"].dt.day_of_week.astype("int8")  # 0 = Monday ... 6 = Sunday (new pandas name)
     return panel  # the panel with 13 new columns
 
+
 def save_features(panel):  # order the columns, save the table and the feature list
     feature_cols = [c for c in panel.columns if c not in ID_COLS + [TARGET]]  # everything except IDs and the label
     panel = panel[ID_COLS + feature_cols + [TARGET]]  # clean order: IDs, features, label
@@ -204,21 +206,20 @@ def save_features(panel):  # order the columns, save the table and the feature l
     return feature_cols  # handy for the checks below
 
 
-
-
-
-def main():  # runs every step in order
+def main(end_date=None):  # runs every step in order; end_date = last day of the panel (None = last fire day, as before)
     grid = gpd.read_file(GRID_PATH)  # the 488 cells
     cell_ids = sorted(grid["cell_id"].unique())  # list of cell IDs in order
-    daily, last_date = load_fire_days()  # fire days without hotspots, and the last data day
-    panel = build_panel(daily, cell_ids, last_date)  # full cell x day table with the label
+    daily, last_date = load_fire_days()  # fire days without hotspots, and the last fire-detection day
+    end = pd.Timestamp(end_date).normalize() if end_date else last_date  # pipeline passes "yesterday"; history keeps the old rule
+    print("Panel ends:", end.date(), "(last fire detection:", last_date.date(), ")")  # show both, so a wrong end is easy to spot
+    panel = build_panel(daily, cell_ids, end)  # full cell x day table with the label
     panel = add_fire_history(panel)  # recent and long-run fire history per cell
     A = neighbor_matrix(grid, cell_ids)  # who touches whom
     panel = add_neighbor_fires(panel, A, cell_ids)  # neighbor fire counts
     panel = add_weather(panel)  # weather and dryness features
     panel = add_weather_anomalies(panel)  # weather compared with each cell's past monthly normal
     panel = add_ndvi(panel)  # vegetation features
-    panel = add_static_and_calendar(panel, grid)  # terrain, land share and calendar    
+    panel = add_static_and_calendar(panel, grid)  # terrain, land share and calendar
     print("Panel shape:", panel.shape)  # rows, columns
     print("Dates:", panel["date"].min().date(), "->", panel["date"].max().date())  # time coverage
     print("Fire cell-days:", int(panel["fire_today"].sum()))  # how many cell-days burned (without hotspots)
@@ -227,10 +228,11 @@ def main():  # runs every step in order
     feature_cols = save_features(panel)  # write features.parquet and feature_columns.json
     missing = panel[feature_cols].isna().mean().sort_values(ascending=False)  # share of missing values per feature
     print("Features with missing values (top 5):")  # header for the next print
-    print(missing[missing > 0].head().round(3).to_dict())  # mostly weather (until the download finishes) and a little NDVI
-    
+    print(missing[missing > 0].head().round(3).to_dict())  # should be tiny now that weather is complete
 
 
 if __name__ == "__main__":  # only runs when you call: python src/features.py
-    main()  # start the build
-   
+    parser = argparse.ArgumentParser(description="Build the feature table.")  # command-line options
+    parser.add_argument("--end", default=None, help="last panel day, YYYY-MM-DD (default: last fire day)")  # optional end date
+    args = parser.parse_args()  # read what was typed
+    main(args.end)  # start the build

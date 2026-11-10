@@ -1,0 +1,1 @@
+"""Daily pipeline: fetch fresh data, build features, score every cell, publish for the API."""  # package description

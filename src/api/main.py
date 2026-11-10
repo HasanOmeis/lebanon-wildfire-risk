@@ -1,12 +1,14 @@
 """FastAPI app: serves next-day wildfire risk for Lebanon's 5 km grid."""  # file description
 
 import datetime as dt  # date type for URLs, and timedelta for the forecast day (t + 1)
+import hmac  # NEW: compares secrets in constant time
 import logging  # writes log lines
+import os  # NEW: reads RELOAD_TOKEN from the environment
 import time  # measures how long each request takes
 from contextlib import asynccontextmanager  # turns a function into "run at startup, then at shutdown"
 
 import pandas as pd  # type of the feature rows passed between helpers
-from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request  # Path = rules for values inside the URL path
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request  # Header = read a value from the request headers (NEW)
 from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse = build an answer by hand, RedirectResponse = send elsewhere
 
 from .predictor import FeatureError, Predictor  # our model loader and its "bad features" error (Step 5)
@@ -27,20 +29,24 @@ logging.basicConfig(  # set up logging once, when the app is imported
 log = logging.getLogger("wildfire.api")  # this app's own logger, so its lines are easy to spot
 
 
+def load_state(app: FastAPI) -> None:  # NEW: load model + serving data, then swap them in together
+    predictor = Predictor()  # load the model, metadata and cutoffs; a broken file raises here
+    store = FeatureStore()  # load the serving features and grid; a broken file raises here
+    app.state.predictor, app.state.store = predictor, store  # swap both only after BOTH loaded fine
+    log.info("Model %s loaded: trained to %s, %d features", predictor.model_file, predictor.trained_to, len(predictor.feature_cols))  # what's serving
+    log.info("Serving features %s to %s (%d days)", store.first, store.last, len(store.by_day))  # the date window
+
+
 @asynccontextmanager  # makes lifespan usable by FastAPI as a startup/shutdown block
 async def lifespan(app: FastAPI):  # FastAPI calls this once when the server starts
-    app.state.predictor = Predictor()  # load the model, metadata and cutoffs once; a broken file stops startup here
-    app.state.store = FeatureStore()  # load the serving features and grid once
-    p, s = app.state.predictor, app.state.store  # short names for the log lines below
-    log.info("Model %s loaded: trained to %s, %d features", p.model_file, p.trained_to, len(p.feature_cols))  # record what's serving
-    log.info("Serving features %s to %s (%d days)", s.first, s.last, len(s.by_day))  # record the date window
+    load_state(app)  # NEW: same loader as /reload, so startup and reload can never differ
     yield  # the server runs and handles requests while we're paused here
     log.info("Shutting down")  # runs when the server stops
 
 
 app = FastAPI(  # create the web app
     title="Lebanon Wildfire-Risk API",  # shown at the top of /docs
-    version="1.0.0",  # API version, shown in /docs
+    version="1.1.0",  # NEW: minor version bump for the /reload endpoint
     description="Next-day wildfire risk for every ~5 km grid cell in Lebanon (LightGBM + SHAP reasons).",  # short summary in /docs
     lifespan=lifespan,  # use our startup block
 )  # end of the app
@@ -64,11 +70,11 @@ async def log_and_protect(request: Request, call_next):  # call_next = "run the 
 
 
 def get_predictor(request: Request) -> Predictor:  # dependency: hands the loaded predictor to any endpoint that asks
-    return request.app.state.predictor  # the one created at startup
+    return request.app.state.predictor  # the current one (replaced by /reload)
 
 
 def get_store(request: Request) -> FeatureStore:  # dependency: hands the loaded serving data to any endpoint that asks
-    return request.app.state.store  # the one created at startup
+    return request.app.state.store  # the current one (replaced by /reload)
 
 
 def to_predictions(cells: list[CellFeatures], p: Predictor, reasons: bool) -> list[Prediction]:  # shared by /predict and /predict/batch
@@ -137,6 +143,33 @@ def health(p: Predictor = Depends(get_predictor)) -> HealthResponse:  # FastAPI 
         n_features=len(p.feature_cols),  # 52
         risk_cutoffs=p.cutoffs,  # the level cutoffs in use
     )  # end of the answer
+
+
+@app.post("/reload", tags=["system"])  # NEW: POST /reload, called by the daily pipeline after it publishes
+def reload(  # NEW: reload model + serving data without restarting the server
+    request: Request,  # gives access to app.state
+    x_reload_token: str | None = Header(None, description="Secret from RELOAD_TOKEN"),  # read from the X-Reload-Token header
+) -> dict:  # small JSON answer
+    expected = os.getenv("RELOAD_TOKEN", "")  # the secret this server was started with
+    if not expected:  # no secret configured
+        raise HTTPException(status_code=503, detail="Reload is disabled (RELOAD_TOKEN not set)")  # switched off, safely
+    if not x_reload_token or not hmac.compare_digest(x_reload_token, expected):  # missing or wrong token
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Reload-Token")  # refused
+    old_last = request.app.state.store.last  # newest served day before the reload
+    try:  # loading new files can fail
+        load_state(request.app)  # load both, then swap (old data stays if this raises)
+    except Exception as err:  # broken or half-written files
+        log.exception("Reload failed; still serving the previous data")  # full details in OUR logs
+        raise HTTPException(status_code=500, detail="Reload failed; still serving the previous data") from err  # clean answer
+    store, p = request.app.state.store, request.app.state.predictor  # the freshly loaded objects
+    return {  # what changed
+        "status": "reloaded",  # success
+        "served_from": str(store.first),  # oldest served day
+        "served_to": str(store.last),  # newest served day
+        "previous_served_to": str(old_last),  # newest served day before
+        "forecast_for": str(store.last + dt.timedelta(days=1)),  # the day /risk/latest is now about
+        "model_file": p.model_file,  # which model is serving
+    }  # end of the answer
 
 
 @app.post("/predict", response_model=Prediction, tags=["predict"])  # POST /predict: features go in the request body

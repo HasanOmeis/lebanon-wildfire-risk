@@ -66,3 +66,7 @@ mlruns/
 !reports/figures/shap_*.png
 # serving files built by src/export_serving.py (rebuilt, not stored)
 data/serving/
+
+# daily pipeline output (rebuilt every morning, not stored)
+data/predictions/
+pipeline_runs/

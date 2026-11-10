@@ -3,11 +3,15 @@
 services:                                  # the list of containers Compose manages
   api:                                     # service name; other services will reach it at http://api:8000
     build: .                               # build from the Dockerfile in this folder
-    image: lebanon-wildfire-api:latest     # name of the image it builds (same tag as Step 6)
+    image: lebanon-wildfire-api:latest     # name of the image it builds (same tag as Day 14)
     container_name: wildfire-api           # fixed container name, so docker logs/exec commands stay the same
     ports:                                 # port mappings: "your machine : container"
       - "8000:8000"                        # http://localhost:8000 on Windows -> port 8000 in the container
     environment:                           # environment variables passed into the container
       PORT: "8000"                         # the port uvicorn listens on (matches the Dockerfile default)
+      RELOAD_TOKEN: ${RELOAD_TOKEN:-}      # secret for POST /reload, read from .env (empty = reload switched off)
+    volumes:                               # folders shared from your machine into the container
+      - ./data/serving:/app/data/serving:ro  # the pipeline's fresh serving files; read-only for the API
+      - ./models:/app/models:ro            # model + metadata + cutoffs, so a retrained model goes live without a rebuild
     restart: unless-stopped                # restart after crashes or reboots, unless you stopped it yourself
     mem_limit: 512m                        # RAM cap, like a free hosting plan; the container is killed if it goes over

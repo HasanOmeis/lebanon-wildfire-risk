@@ -4,7 +4,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 
 ## Project Status
 
-🚧 **In progress — Day 14 of 18 complete**
+🚧 **In progress — Day 15 of 18 complete**
 
 | Day | Task | Status |
 |----|------|--------|
@@ -22,8 +22,8 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 | 12 | SHAP explainability | ✅ Done |
 | 13 | FastAPI service | ✅ Done |
 | 14 | Docker | ✅ Done |
-| 15 | Daily pipeline | ⏳ Next |
-| 16 | Streamlit live map | ⬜ |
+| 15 | Daily pipeline | ✅ Done |
+| 16 | Streamlit live map | ⏳ Next |
 | 17 | Deploy | ⬜ |
 | 18 | README + showcase | ⬜ |
 
@@ -533,6 +533,72 @@ docker run -d --name wildfire-api -p 8000:8000 lebanon-wildfire-api:1.0.0
 - **The model and serving data are not in Git** (`models/*` and `data/serving/` are ignored). The image is built from the local project folder, which has them. Deploying from GitHub (Day 17) needs a way to deliver these files.
 - **First builds are slow on a slow connection.** The base image and Python packages are about 200 MB to download once; `PIP_DEFAULT_TIMEOUT=120` and `PIP_RETRIES=10` in the Dockerfile stop pip from giving up too early. After that, everything is cached.
 
+### Daily pipeline (Day 15)
+
+One command turns the project from "a model that ran once" into a system that refreshes itself every morning: it downloads new data, rebuilds the features with the **same code used for training**, checks them, scores every cell for today, keeps a dated history, and tells the running API to swap in the new data.
+
+```powershell
+python -m src.pipeline.run_daily                     # normal run: features up to yesterday -> risk for today
+python -m src.pipeline.run_daily --from 2026-11-05   # catch-up: score every day from Nov 5 to yesterday
+python -m src.pipeline.run_daily --skip-fetch        # offline: reuse the data on disk
+```
+
+**Flow**
+
+| Step | File | What it does |
+|---|---|---|
+| Fires | `src/pipeline/fetch_fires.py` | FIRMS VIIRS near-real-time in 5-day chunks, from the day after the last detection (max 60 days back); same cleaning as Day 2; duplicates dropped |
+| Weather | `src/pipeline/fetch_weather.py` | Open-Meteo forecast API for the 126 weather points, copied to 488 cells; rows tagged `archive` or `forecast` |
+| Vegetation | `src/pipeline/fetch_ndvi.py` | New MODIS composites through the Day 5 functions (`search_items`, `process_date`), same availability lag; terrain is static and only checked |
+| Features | `src/pipeline/build_features.py` | Runs `join_fires.py` and `features.py --end <yesterday>` unchanged, then confirms the table really ends on that day |
+| Checks | `src/pipeline/checks.py` | Quality gate on the serving day (see below); a failure stops the run and the previous map stays up |
+| Score + publish | `src/pipeline/score.py` | The API's own `Predictor` scores all 488 cells; saves `data/predictions/risk_<day>.parquet` and `latest.json`; runs `export_serving.py`; calls `POST /reload` |
+| Runner | `src/pipeline/run_daily.py` | Chains the steps with timing, a log file per run, a lock against overlapping runs, run history and exit codes |
+
+**Design choices**
+- **Features describe yesterday, the risk is for today.** On a morning run, today's satellite passes aren't finished, so `fire_today` and the neighbor-fire features would be near zero for every cell, unlike in training. Using the last *complete* day keeps serving features identical to training features (no training/serving skew).
+- **One feature code path.** The pipeline calls `features.py` itself (new optional `--end`), so training and serving features can never drift apart.
+- **Archive vs forecast weather.** The history comes from Open-Meteo's archive API, which lags ~5 days; recent days come from the forecast API. Each row is tagged with its `source`: archive rows are final and never overwritten, forecast rows are replaced on every run as values settle.
+- **Quality gate before publishing.** Hard checks: the day exists, exactly 488 cells, every model feature present, no missing core weather or fire-history values, physical ranges (temperature −30–55 °C, humidity 0–100 %, no negative rain or wind). Soft warnings: NaN in secondary features (LightGBM handles them) and NDVI older than 45 days. Exit codes: `0` ok, `2` blocked by a check, `1` other error.
+- **Safe, repeatable writes.** Every file is written to a temp file and then swapped in, so a crash never leaves a half-written parquet. Re-running a day replaces its files instead of appending: the pipeline is idempotent.
+- **Self-healing.** Fires and weather catch up from the last day they have, so a missed morning (or a few days away) is filled automatically on the next run.
+- **Live reload without a restart.** `POST /reload` (protected by `RELOAD_TOKEN`, compared in constant time; switched off when no token is set) loads the new model and serving data first and swaps them in only if both load, so a broken file never takes the API down. If the API is unreachable, the run still succeeds with a warning.
+- **Docker reads the pipeline's output.** `docker-compose.yml` mounts `data/serving` and `models` read-only into the container, and passes only `RELOAD_TOKEN` from `.env`.
+
+**Scheduling (Windows Task Scheduler)**
+
+`scripts/run_pipeline.cmd` runs the pipeline with the project's venv from any folder. Registered once:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$PWD\scripts\run_pipeline.cmd`""
+$trigger = New-ScheduledTaskTrigger -Daily -At "08:31"
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 1)
+Register-ScheduledTask -TaskName "LebanonWildfireDaily" -Action $action -Trigger $trigger -Settings $settings
+```
+
+It runs daily at 08:31 Beirut time (or as soon as the PC wakes up), with a 1-hour limit. Each run writes `pipeline_runs/run_<UTC time>.log` and one line in `pipeline_runs/history.csv` (start, status, seconds, scored days, error).
+
+**`.env` settings** (see `.env.example`)
+
+| Name | Used by | Purpose |
+|---|---|---|
+| `FIRMS_MAP_KEY` | fire download | NASA FIRMS API key |
+| `RELOAD_TOKEN` | API + pipeline | shared secret for `POST /reload` |
+| `API_URL` | pipeline | where the running API is, e.g. `http://127.0.0.1:8000` |
+
+**First runs (2026-11-10)**
+- Catch-up from Oct 29: 6 new FIRMS detections (all outside Lebanon's cells), 12 days × 488 cells of weather, 1 new NDVI composite.
+- Feature table now runs 2012-01-25 → 2026-11-09 (2.64 M rows); the API serves 2025-10-06 → 2026-11-09 and `/risk/latest` shows 2026-11-10.
+- Forecast for 2026-11-10: 465 low, 22 moderate, 1 extreme. The extreme cell (464) burned 11 days earlier, and the model leans on recent fire history; levels are relative to the 2024–2026 distribution, so in a quiet November one recently burned cell crosses the top cutoff.
+- A full run takes ~40 s (features ~13 s); the reload inside the container takes ~0.3 s. The first scheduled run finished with result `0`.
+
+**Tests** (`tests/test_pipeline.py`, offline: downloads are replaced by fakes, files go to a temp folder): the quality gate passes a good day and blocks each failure type; re-fetching fires never duplicates and drops low-confidence detections; weather forecasts are replaced while archive rows stay untouched; catch-up day lists; `/reload` gives 503 / 401 / 200. 34 tests pass in total.
+
+**Notes**
+- **The schedule runs on this PC.** It only fires when the PC is on (or on the next wake-up). A cloud scheduler comes with the Day 17 deploy.
+- **NDVI arrives every ~8 days, a few days late.** Between composites the features forward-fill NDVI and `ndvi_age_days` grows, exactly as in training.
+- **Recent weather comes from a different source than the history** (forecast vs archive API). Tagging every row makes this measurable; refreshing older forecast rows from the archive once it catches up is a possible next step.
+
 ## Scripts
 
 | Script | What it does |
@@ -554,7 +620,7 @@ docker run -d --name wildfire-api -p 8000:8000 lebanon-wildfire-api:1.0.0
 | `src/terrain.py` | Downloads the 90 m DEM, computes slope/aspect and saves per-cell terrain features |
 | `src/check_day5.py` | Maps of NDVI, elevation and steep south-facing share + NDVI seasonal cycle |
 | `src/check_data.py` | Status report for every dataset: rows, columns, date range, missing values, download progress |
-| `src/features.py` | Builds the leakage-safe feature table (`features.parquet`) and the feature list (`feature_columns.json`) |
+| `src/features.py` | Builds the leakage-safe feature table (`features.parquet`) and the feature list (`feature_columns.json`); `--end YYYY-MM-DD` sets the last day (used by the daily pipeline) |
 | `src/train_baseline.py` | Time split, naive baselines, logistic regression, MLflow logging; saves `reports/baseline_results.csv` |
 | `src/train_lgbm.py` | LightGBM with early stopping, same split + metrics as the baseline, MLflow logging; saves `reports/model_results.csv` |
 | `src/validate.py` | Random-split leak demo + time, spatial and space-time validation folds, MLflow logging; `python src\validate.py all` |
@@ -575,11 +641,14 @@ docker run -d --name wildfire-api -p 8000:8000 lebanon-wildfire-api:1.0.0
 | `Dockerfile` | Builds the API image: Python 3.12-slim, `libgomp1`, pinned packages, non-root user, health check, `PORT` variable |
 | `.dockerignore` | Allowlist: only `src/api/`, `models/`, `data/serving/` and `requirements-api.txt` reach the build |
 | `requirements-api.txt` | Runtime packages for the container only, pinned to the training versions |
-| `docker-compose.yml` | Runs the API service with port 8000, auto-restart and a 512 MB memory cap |
+| `docker-compose.yml` | Runs the API service with port 8000, auto-restart, a 512 MB memory cap, read-only mounts of `data/serving` and `models`, and `RELOAD_TOKEN` from `.env` |
+| `src/pipeline/` | Daily pipeline: `config.py` (paths, windows, keys), `fetch_fires.py`, `fetch_weather.py`, `fetch_ndvi.py`, `build_features.py`, `checks.py` (quality gate), `score.py` (score, history, publish), `notify_api.py` (`POST /reload`), `run_daily.py` (runner) |
+| `scripts/run_pipeline.cmd` | Launcher for Windows Task Scheduler: runs `run_daily` with the project's venv |
 | `scripts/smoke_test.py` | 11 end-to-end checks against a running API, local or deployed: `python scripts\smoke_test.py [URL]` |
 | `tests/test_features.py` | pytest checks: future-leakage test, label correctness, completeness, NDVI timing, feature list |
 | `tests/test_api.py` | API tests with FastAPI's TestClient: every endpoint, error codes, route consistency, level boundaries |
 | `tests/test_labels.py` | Every model feature has a plain-English label, and no label is stale |
+| `tests/test_pipeline.py` | Pipeline tests (offline): quality gate, idempotent fire updates, weather upsert rules, catch-up days, `/reload` security |
 | `tests/test_errors.py` | Unexpected errors give a clean 500 without leaking details; requests are logged and timed |
 | `notebooks/06_eda.ipynb` | Exploratory data analysis: target, hotspots, timing, location, conflict shift, terrain, NDVI, weather |
 | `notebooks/07_features_check.ipynb` | Missing values per feature and feature lift charts |
@@ -623,3 +692,5 @@ docker run -d --name wildfire-api -p 8000:8000 lebanon-wildfire-api:1.0.0
 35. `uvicorn src.api.main:app --reload` *(then open http://127.0.0.1:8000/docs)*
 36. `docker compose up -d --build` *(the same API in a container)*
 37. `python scripts\smoke_test.py`
+38. `python -m src.pipeline.run_daily` *(every morning; scheduled with Task Scheduler)*
+39. `python -m pytest tests\test_pipeline.py -v`
