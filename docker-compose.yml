@@ -1,7 +1,7 @@
-# Lebanon Wildfire-Risk: all services in one file (Streamlit map joins on Day 16)  # what this file is for
+# Lebanon Wildfire-Risk: all services in one file (API + Streamlit map)  # what this file is for
 
 services:                                  # the list of containers Compose manages
-  api:                                     # service name; other services will reach it at http://api:8000
+  api:                                     # service name; other services reach it at http://api:8000
     build: .                               # build from the Dockerfile in this folder
     image: lebanon-wildfire-api:latest     # name of the image it builds (same tag as Day 14)
     container_name: wildfire-api           # fixed container name, so docker logs/exec commands stay the same
@@ -15,3 +15,20 @@ services:                                  # the list of containers Compose mana
       - ./models:/app/models:ro            # model + metadata + cutoffs, so a retrained model goes live without a rebuild
     restart: unless-stopped                # restart after crashes or reboots, unless you stopped it yourself
     mem_limit: 512m                        # RAM cap, like a free hosting plan; the container is killed if it goes over
+
+  app:                                     # the Streamlit map
+    build:                                 # build settings
+      context: .                           # send the project folder to Docker (filtered by Dockerfile.app.dockerignore)
+      dockerfile: Dockerfile.app           # use the app's Dockerfile, not the API's
+    image: lebanon-wildfire-app:latest     # name of the image it builds
+    container_name: wildfire-app           # fixed container name for docker logs/exec
+    ports:                                 # port mappings: "your machine : container"
+      - "8501:8501"                        # http://localhost:8501 on Windows -> Streamlit in the container
+    environment:                           # environment variables passed into the container
+      PORT: "8501"                         # the port Streamlit listens on (matches the Dockerfile default)
+      WILDFIRE_API_URL: http://api:8000    # reach the API by its service name on Compose's private network
+    depends_on:                            # start order
+      api:                                 # wait for the API...
+        condition: service_healthy         # ...until its /health check passes, not just until it starts
+    restart: unless-stopped                # restart after crashes or reboots, unless you stopped it yourself
+    mem_limit: 512m                        # same RAM cap as the API

@@ -1,0 +1,15 @@
+# Allowlist for the Streamlit image: start by ignoring every file and folder in the project
+*
+
+# Let back in the app's runtime package list (used by pip in Dockerfile.app)
+!requirements-app.txt
+
+# Let back in the app code only
+!app/
+
+# Let back in the theme/settings file (never secrets.toml, which stays ignored)
+!.streamlit/config.toml
+
+# Even inside allowed folders, skip Python bytecode caches
+**/__pycache__
+**/*.pyc

@@ -1,0 +1,12 @@
+# Runtime packages for the Streamlit map container only (no model, no training tools)  # what this file is for
+# Versions match the .venv the app was built and tested with                            # why everything is pinned with ==
+
+streamlit==1.66.1          # the web app framework
+pydeck==0.9.3              # the map layer (GeoJSON polygons, hover, click selection)
+requests==2.34.2           # HTTP calls to the API (app/api_client.py)
+pandas==3.1.0              # the top-risk table and the CSV download
+numpy==2.5.4               # math arrays used by pandas
+pyarrow==25.0.1            # Streamlit uses it to send tables to the browser
+altair==6.3.0              # Streamlit dependency; pinned so the container matches the venv
+protobuf==7.36.2           # Streamlit dependency (messages between server and browser); pinned for the same reason
+tornado==6.6               # Streamlit's web server; pinned for the same reason

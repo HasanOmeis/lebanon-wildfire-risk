@@ -2,9 +2,11 @@
 
 Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and shows it on a live map.
 
+![Lebanon Fire Radar: the Streamlit map on 2026-08-11](reports/figures/16_streamlit_map.png)
+
 ## Project Status
 
-🚧 **In progress — Day 15 of 18 complete**
+🚧 **In progress — Day 16 of 18 complete**
 
 | Day | Task | Status |
 |----|------|--------|
@@ -23,8 +25,8 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 | 13 | FastAPI service | ✅ Done |
 | 14 | Docker | ✅ Done |
 | 15 | Daily pipeline | ✅ Done |
-| 16 | Streamlit live map | ⏳ Next |
-| 17 | Deploy | ⬜ |
+| 16 | Streamlit live map | ✅ Done |
+| 17 | Deploy | ⏳ Next |
 | 18 | README + showcase | ⬜ |
 
 ## Data Sources
@@ -599,6 +601,52 @@ It runs daily at 08:31 Beirut time (or as soon as the PC wakes up), with a 1-hou
 - **NDVI arrives every ~8 days, a few days late.** Between composites the features forward-fill NDVI and `ndvi_age_days` grows, exactly as in training.
 - **Recent weather comes from a different source than the history** (forecast vs archive API). Tagging every row makes this measurable; refreshing older forecast rows from the archive once it catches up is a possible next step.
 
+### Live map (Day 16)
+
+**Lebanon Fire Radar** is a Streamlit page that turns the API into something anyone can read: all 488 cells on a map of Lebanon, colored by tomorrow's risk level, with the model's reasons one click away.
+
+```powershell
+docker compose up -d --build        # API + map; open http://localhost:8501
+streamlit run app/streamlit_app.py  # or run the map from the venv (API must be running)
+```
+
+**What a visitor sees**
+- **Summary cards**: the forecast day, cells per level (extreme → low) and the single riskiest cell.
+- **Risk map** (pydeck): one polygon per cell, colored by level; low cells are nearly transparent so the few risky cells stand out. Hovering shows the cell, its risk and its level.
+- **Click a cell for "why"**: a side panel calls `/explain` and shows the cell's top 3 SHAP reasons in plain English (🔺 raises risk, 🔻 lowers it). Before any click it explains the riskiest cell.
+- **Day picker**: any forecast day in the 400-day serving window; past days show what the model said before the fact.
+- **Legend** with the exact map colors and the live probability cutoffs from `/health` (they update by themselves after a retrain).
+- **Top 10 table** and a CSV download of all 488 cells for the chosen day.
+- **"How it works"**: the system in five lines, with a link to this repo.
+
+**Design choices**
+- **The page only talks to the API.** Every call goes through `app/api_client.py`, which owns the address, timeouts, and turns every failure (refused connection, timeout, 404, non-JSON error page) into one `ApiError` with a readable message. The page never imports the model, so the app image needs no LightGBM.
+- **One setting moves it to the cloud.** The API address comes from `WILDFIRE_API_URL` (default `http://127.0.0.1:8000`; `http://api:8000` inside Compose).
+- **Caching.** API answers are cached for 5 minutes per day and per (cell, day). Clicks are instant, and a fresh pipeline run still shows up within minutes. Errors are never cached.
+- **Honest about stale data.** If the newest forecast is older than today (UTC), a yellow banner says so, for example when a morning pipeline run fails.
+- **Friendly failure.** API down → a red message with a 🔄 Retry button instead of a traceback; a day outside the window → a warning and the latest map; an `/explain` failure only affects the side panel.
+- **Levels, not raw probabilities, drive the colors.** Probabilities are small (the extreme cutoff is 2.66 %), so a continuous scale would look flat; the four Day 13 levels are what a reader should act on.
+- **Compact layout.** A small CSS block and a theme in `.streamlit/config.toml` fit the cards, map and panel on one screen.
+
+**In Docker**
+- `Dockerfile.app`: `python:3.12-slim`, pinned `requirements-app.txt` (Streamlit, pydeck, requests, pandas: no model, no training tools), non-root user, health check on Streamlit's `/_stcore/health`, no file watching inside the image.
+- `Dockerfile.app.dockerignore`: its own allowlist (`app/`, `.streamlit/config.toml`, `requirements-app.txt`); the API's `.dockerignore` is unchanged.
+- `docker-compose.yml`: the `app` service starts only after the API's health check passes (`depends_on: service_healthy`), reaches it at `http://api:8000` on Compose's network, and has the same 512 MB cap.
+
+**What the map showed (2026-11-11)**
+- Today's forecast: 443 low, 42 moderate, 3 high, 0 extreme; the riskiest cell (464, 2.63 %) is driven by recent fire history: 12 days since the last fire and 17 fire days this year.
+- 2026-08-11 (peak season): 26 extreme and 86 high cells across the south and the north; the top cell reaches 28 %.
+- 2026-03-18 (wet spring): 487 low and 1 moderate.
+
+**Tests** (`tests/test_app.py`, offline): the API client against fake HTTP answers (success, 404 with the API's message, non-JSON error page, refused connection, timeout, query parameters), and the page itself with Streamlit's `AppTest` on fake API data (cards, default panel, small-value formatting, red error + Retry, stale-data banner). 43 tests pass in total.
+
+**Also fixed today**
+- **Weather retries now cover network drops.** The scheduled run on 2026-11-11 stopped on a `ConnectTimeout` to Open-Meteo; the quality gate kept the previous map up, as designed. `fetch_weather.py` used to retry only on HTTP error codes; it now also retries connection errors and timeouts (3 tries, 20 s / 40 s waits).
+
+**Notes**
+- **The day picker's window is copied, not imported.** `SERVED_DAYS = 400` must match `DAYS_KEPT` in `src/export_serving.py` (the app image doesn't include that script). A day outside the real window still falls back cleanly.
+- **FIRMS returned no detections for 2026-11-02 → 11-10.** Plausible for rainy November, but worth checking against the FIRMS map before the showcase.
+
 ## Scripts
 
 | Script | What it does |
@@ -641,14 +689,21 @@ It runs daily at 08:31 Beirut time (or as soon as the PC wakes up), with a 1-hou
 | `Dockerfile` | Builds the API image: Python 3.12-slim, `libgomp1`, pinned packages, non-root user, health check, `PORT` variable |
 | `.dockerignore` | Allowlist: only `src/api/`, `models/`, `data/serving/` and `requirements-api.txt` reach the build |
 | `requirements-api.txt` | Runtime packages for the container only, pinned to the training versions |
-| `docker-compose.yml` | Runs the API service with port 8000, auto-restart, a 512 MB memory cap, read-only mounts of `data/serving` and `models`, and `RELOAD_TOKEN` from `.env` |
+| `docker-compose.yml` | Runs the API (port 8000, read-only mounts of `data/serving` and `models`, `RELOAD_TOKEN` from `.env`) and the map (port 8501, starts after the API is healthy); both auto-restart with a 512 MB memory cap |
 | `src/pipeline/` | Daily pipeline: `config.py` (paths, windows, keys), `fetch_fires.py`, `fetch_weather.py`, `fetch_ndvi.py`, `build_features.py`, `checks.py` (quality gate), `score.py` (score, history, publish), `notify_api.py` (`POST /reload`), `run_daily.py` (runner) |
+| `app/api_client.py` | The map's only link to the API: address from `WILDFIRE_API_URL`, timeouts, one `ApiError` for every failure |
+| `app/streamlit_app.py` | Lebanon Fire Radar: summary cards, risk map, click-to-explain panel, day picker, legend, top-10 table + CSV, stale-data banner |
+| `.streamlit/config.toml` | Theme (wildfire colors) and settings (minimal toolbar, no usage stats) |
+| `Dockerfile.app` | Builds the map image: Python 3.12-slim, pinned packages, non-root user, health check, `PORT` and `WILDFIRE_API_URL` variables |
+| `Dockerfile.app.dockerignore` | Allowlist for the map image: only `app/`, `.streamlit/config.toml` and `requirements-app.txt` |
+| `requirements-app.txt` | Runtime packages for the map container only, pinned to the venv versions |
 | `scripts/run_pipeline.cmd` | Launcher for Windows Task Scheduler: runs `run_daily` with the project's venv |
 | `scripts/smoke_test.py` | 11 end-to-end checks against a running API, local or deployed: `python scripts\smoke_test.py [URL]` |
 | `tests/test_features.py` | pytest checks: future-leakage test, label correctness, completeness, NDVI timing, feature list |
 | `tests/test_api.py` | API tests with FastAPI's TestClient: every endpoint, error codes, route consistency, level boundaries |
 | `tests/test_labels.py` | Every model feature has a plain-English label, and no label is stale |
 | `tests/test_pipeline.py` | Pipeline tests (offline): quality gate, idempotent fire updates, weather upsert rules, catch-up days, `/reload` security |
+| `tests/test_app.py` | Map tests (offline): API client against fake HTTP answers, and the page with Streamlit's `AppTest` on fake data |
 | `tests/test_errors.py` | Unexpected errors give a clean 500 without leaking details; requests are logged and timed |
 | `notebooks/06_eda.ipynb` | Exploratory data analysis: target, hotspots, timing, location, conflict shift, terrain, NDVI, weather |
 | `notebooks/07_features_check.ipynb` | Missing values per feature and feature lift charts |
@@ -694,3 +749,4 @@ It runs daily at 08:31 Beirut time (or as soon as the PC wakes up), with a 1-hou
 37. `python scripts\smoke_test.py`
 38. `python -m src.pipeline.run_daily` *(every morning; scheduled with Task Scheduler)*
 39. `python -m pytest tests\test_pipeline.py -v`
+40. `docker compose up -d --build` *(API + live map; open http://localhost:8501)*

@@ -70,3 +70,6 @@ data/serving/
 # daily pipeline output (rebuilt every morning, not stored)
 data/predictions/
 pipeline_runs/
+
+# Streamlit secrets (never commit)
+.streamlit/secrets.toml

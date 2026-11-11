@@ -1,0 +1,18 @@
+# Streamlit settings for Lebanon Fire Radar (read automatically at startup)
+
+[theme]
+base = "light"                        # start from the light theme
+primaryColor = "#d7301f"              # buttons, radio dots, links: same deep red as "extreme" cells
+backgroundColor = "#fffdf9"           # page background: warm off-white instead of pure white
+secondaryBackgroundColor = "#f6efe6"  # sidebar and input boxes: light sand
+textColor = "#2b2118"                 # dark brown-black text, softer than pure black
+font = "sans serif"                   # clean font for numbers and labels
+
+[client]
+toolbarMode = "minimal"               # hide developer menu items (Deploy, Rerun settings) from visitors
+
+[server]
+runOnSave = true                      # reload the page automatically when you save a file (no more "Rerun" clicks)
+
+[browser]
+gatherUsageStats = false              # don't send usage statistics to Streamlit

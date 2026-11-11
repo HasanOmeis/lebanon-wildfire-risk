@@ -23,6 +23,8 @@ DAILY_VARS = [  # the same 7 variables as Day 4, same names as the file's column
 ]  # end of the variable list
 BATCH = 25  # weather points per request (keeps the URL short)
 MAX_BACK_DAYS = 90  # the forecast API only reaches about 3 months back
+TRIES = 3  # how many times to try one request before giving up
+NETWORK_ERRORS = (requests.ConnectionError, requests.Timeout)  # connection dropped, or no answer in time (ConnectTimeout is both)
 
 
 def fetch_points(points: pd.DataFrame, start: dt.date, end: dt.date) -> pd.DataFrame:  # one request for several points
@@ -34,15 +36,23 @@ def fetch_points(points: pd.DataFrame, start: dt.date, end: dt.date) -> pd.DataF
         "start_date": start.isoformat(),  # first day
         "end_date": end.isoformat(),  # last day
     }  # end of the settings
-    for attempt in range(1, 4):  # up to 3 tries
-        resp = requests.get(URL, params=params, timeout=60)  # send the request
+    for attempt in range(1, TRIES + 1):  # try 1, 2, 3
+        wait = 20 * attempt  # wait longer after each failure: 20 s, 40 s
+        try:  # the request itself can fail before any answer arrives
+            resp = requests.get(URL, params=params, timeout=60)  # send the request
+        except NETWORK_ERRORS as err:  # no answer at all (network drop, DNS, timeout)
+            if attempt == TRIES:  # that was the last try
+                raise RuntimeError(f"Open-Meteo unreachable after {TRIES} tries: {type(err).__name__}") from err  # give up, keep the original error attached
+            log.warning("%s, retry %d in %d s", type(err).__name__, attempt, wait)  # record the retry
+            time.sleep(wait)  # pause before trying again
+            continue  # next try
         if resp.status_code == 200:  # success
             break  # stop retrying
-        if resp.status_code in (429, 500, 502, 503) and attempt < 3:  # rate limit or server trouble
-            log.warning("HTTP %d, retry %d in %d s", resp.status_code, attempt, 20 * attempt)  # record the retry
-            time.sleep(20 * attempt)  # wait longer each time
-            continue  # try again
-        raise RuntimeError(f"Open-Meteo error {resp.status_code}: {resp.text[:200]}")  # give up with the reason
+        if resp.status_code in (429, 500, 502, 503) and attempt < TRIES:  # rate limit or server trouble
+            log.warning("HTTP %d, retry %d in %d s", resp.status_code, attempt, wait)  # record the retry
+            time.sleep(wait)  # pause before trying again
+            continue  # next try
+        raise RuntimeError(f"Open-Meteo error {resp.status_code}: {resp.text[:200]}")  # any other error: give up with the reason
     data = resp.json()  # reply as Python objects
     data = data if isinstance(data, list) else [data]  # one point returns a dict, several return a list
     frames = []  # one table per point
