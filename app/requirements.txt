@@ -1,0 +1,3 @@
+# Streamlit Community Cloud reads this file first (it's next to streamlit_app.py), instead of the big root requirements.txt  # why this file exists
+# It includes the same pinned list the app's Docker image uses, so both deployments run identical packages                # one source of truth
+-r ../requirements-app.txt
