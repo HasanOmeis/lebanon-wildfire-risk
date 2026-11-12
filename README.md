@@ -2,11 +2,15 @@
 
 Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and shows it on a live map.
 
+**🔥 Live demo:** [lebanon-fire-radar.streamlit.app](https://lebanon-fire-radar.streamlit.app) · **API docs:** [lebanon-fire-radar-api.onrender.com/docs](https://lebanon-fire-radar-api.onrender.com/docs) · **Serving data:** [Hugging Face dataset](https://huggingface.co/datasets/hasan-omeis/lebanon-fire-radar-serving)
+
+> Both services run on free plans that sleep when nobody visits, so the first load can take about a minute while the API wakes up.
+
 ![Lebanon Fire Radar: the Streamlit map on 2026-08-11](reports/figures/16_streamlit_map.png)
 
 ## Project Status
 
-🚧 **In progress — Day 16 of 18 complete**
+🚧 **In progress — Day 17 of 18 complete**
 
 | Day | Task | Status |
 |----|------|--------|
@@ -26,8 +30,8 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 | 14 | Docker | ✅ Done |
 | 15 | Daily pipeline | ✅ Done |
 | 16 | Streamlit live map | ✅ Done |
-| 17 | Deploy | ⏳ Next |
-| 18 | README + showcase | ⬜ |
+| 17 | Deploy (Hugging Face Hub + Render + Streamlit Cloud) | ✅ Done |
+| 18 | README + showcase | ⏳ Next |
 
 ## Data Sources
 - **NASA FIRMS**: satellite fire detections (VIIRS, 375 m)
@@ -37,7 +41,7 @@ Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and sho
 - **Copernicus DEM** (90 m) via Microsoft Planetary Computer: elevation and terrain
 
 ## Stack
-Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · matplotlib · Jupyter · pytest · scikit-learn · LightGBM · MLflow · Optuna · SHAP · FastAPI · Docker · Streamlit
+Python 3.12 · pandas · geopandas · xarray · rioxarray · odc-stac · matplotlib · Jupyter · pytest · scikit-learn · LightGBM · MLflow · Optuna · SHAP · FastAPI · Docker · Streamlit · Hugging Face Hub · Render · Streamlit Community Cloud
 
 ## Setup
 1. `py -3.12 -m venv .venv`
@@ -532,7 +536,7 @@ docker run -d --name wildfire-api -p 8000:8000 lebanon-wildfire-api:1.0.0
 - a wrong cell or date gives 404, a misspelled feature gives 422
 
 **Notes**
-- **The model and serving data are not in Git** (`models/*` and `data/serving/` are ignored). The image is built from the local project folder, which has them. Deploying from GitHub (Day 17) needs a way to deliver these files.
+- **The model and serving data are not in Git** (`models/*` and `data/serving/` are ignored). The image is built from the local project folder, which has them. Deploying from GitHub needed a way to deliver these files: solved on Day 17 with the Hugging Face Hub, and the image is now code only (see Deploy).
 - **First builds are slow on a slow connection.** The base image and Python packages are about 200 MB to download once; `PIP_DEFAULT_TIMEOUT=120` and `PIP_RETRIES=10` in the Dockerfile stop pip from giving up too early. After that, everything is cached.
 
 ### Daily pipeline (Day 15)
@@ -597,7 +601,7 @@ It runs daily at 08:31 Beirut time (or as soon as the PC wakes up), with a 1-hou
 **Tests** (`tests/test_pipeline.py`, offline: downloads are replaced by fakes, files go to a temp folder): the quality gate passes a good day and blocks each failure type; re-fetching fires never duplicates and drops low-confidence detections; weather forecasts are replaced while archive rows stay untouched; catch-up day lists; `/reload` gives 503 / 401 / 200. 34 tests pass in total.
 
 **Notes**
-- **The schedule runs on this PC.** It only fires when the PC is on (or on the next wake-up). A cloud scheduler comes with the Day 17 deploy.
+- **The schedule runs on this PC.** It only fires when the PC is on (or on the next wake-up). Since Day 17 it also publishes to the cloud: each run uploads the serving files to the Hugging Face Hub and reloads the live API, so the public map follows this PC's schedule.
 - **NDVI arrives every ~8 days, a few days late.** Between composites the features forward-fill NDVI and `ndvi_age_days` grows, exactly as in training.
 - **Recent weather comes from a different source than the history** (forecast vs archive API). Tagging every row makes this measurable; refreshing older forecast rows from the archive once it catches up is a possible next step.
 
@@ -647,6 +651,58 @@ streamlit run app/streamlit_app.py  # or run the map from the venv (API must be 
 - **The day picker's window is copied, not imported.** `SERVED_DAYS = 400` must match `DAYS_KEPT` in `src/export_serving.py` (the app image doesn't include that script). A day outside the real window still falls back cleanly.
 - **FIRMS returned no detections for 2026-11-02 → 11-10.** Plausible for rainy November, but worth checking against the FIRMS map before the showcase.
 
+### Deploy (Day 17)
+
+The project now runs in the cloud, on free plans, with each piece where it belongs:
+
+| Piece | Where | What it holds |
+|---|---|---|
+| Code | GitHub (this repo) | everything that builds and runs; no data, no secrets |
+| Model + serving data | [Hugging Face Hub](https://huggingface.co/datasets/hasan-omeis/lebanon-fire-radar-serving) (public dataset) | the 5 files the API reads: `lgbm_tuned.txt`, `model_meta.json`, `risk_levels.json`, `recent_features.parquet`, `grid.geojson` (7.3 MB) |
+| API | [Render](https://lebanon-fire-radar-api.onrender.com/docs) (Docker, Frankfurt, free, 512 MB) | the Day 14 image, now code-only |
+| Map | [Streamlit Community Cloud](https://lebanon-fire-radar.streamlit.app) | the Day 16 app, reading the Render API |
+| Daily pipeline | this PC (Task Scheduler, Day 15) | fetch, features, quality gate, score, then publish to the Hub |
+
+**How a daily update reaches the public map**
+
+```text
+08:31 Task Scheduler -> run_daily -> quality gate passes -> score + export_serving
+  -> reload the local API (http://127.0.0.1:8000)
+  -> upload the 5 files to the Hub (one commit)
+  -> POST /reload on Render -> the API pulls that commit -> the map shows it within 5 minutes (cache)
+```
+
+**Design choices**
+- **Model and data live outside Git.** The model and serving files are gitignored, so a platform that builds from GitHub never had them; that's the problem this day solves. A versioned model/data store is the standard MLOps answer, and every upload is a Hub commit, so the history shows exactly which data served on which day.
+- **The image is code only.** The Dockerfile no longer copies `models/` or `data/serving/`. The same image runs two ways: on the laptop, Compose mounts the local folders (`Files from: local folders` in the log); in the cloud, `HF_REPO` is set and `src/api/hub_sync.py` downloads the files at startup and on every `/reload` (`Files from: Hugging Face commit e0a409c`).
+- **One consistent set.** The sync reads the repo's newest commit ID first, then downloads exactly that commit, so an upload landing mid-download can never mix a new model with old data. The upload is one commit with all 5 files for the same reason.
+- **One file list for both sides.** `SERVING_FILES` in `src/api/hub_sync.py` is the only list; `src/publish_hub.py` imports it, so the upload and the download can't disagree.
+- **Secrets stay where they're needed.** The Hub write token exists only in the laptop's `.env`. The repo is public, so the cloud API downloads without any token. Render holds `RELOAD_TOKEN`; Streamlit holds only the API address.
+- **A failed upload never breaks the local update.** Order in `publish_serving()`: refresh files, reload the local API, upload, reload the live API. If the upload fails (no internet, Hub down), the run logs a warning and still counts as OK; the live map shows its stale-data banner until the next good run. The live API is only reloaded when there's a new upload.
+- **No empty commits.** When the files are byte-identical to the last upload, the Hub skips the commit, so reruns don't clutter the history.
+- **Built for the sleeping free plan.** Render sleeps after 15 minutes idle and needs about a minute to wake. The map's first call (`/health`) waits up to 100 s and shows "Waking up the server…" instead of a timeout error; every other call keeps the normal 30 s timeout. The pipeline's reload waits up to 120 s for the same reason. `HEAD /` is allowed because Render probes the service with it.
+- **The map installs only what it needs.** Streamlit Cloud reads `app/requirements.txt` (next to the app) before the root one; it points to `requirements-app.txt`, so the cloud and the app's Docker image run the same pinned packages, without the training stack.
+
+**`.env` settings added today** (see `.env.example`)
+
+| Name | Used by | Purpose |
+|---|---|---|
+| `HF_TOKEN` | pipeline (laptop only) | Hugging Face write token for the daily upload; never committed |
+| `HF_REPO` | pipeline, cloud API | the dataset repo, `hasan-omeis/lebanon-fire-radar-serving` |
+| `LIVE_API_URL` | pipeline | the live API, reloaded after each upload |
+
+On Render: `HF_REPO` and `RELOAD_TOKEN` (Render sets `PORT` itself). On Streamlit Cloud, one secret: `WILDFIRE_API_URL`.
+
+**Checks**
+- Cloud mode tested locally first: the new image with **no mounts** and only `HF_REPO` set downloaded all 5 files and served the full map (488 cells); local Compose still reads the mounted folders.
+- The first cloud start found a real bug: the download writes a `.cache/` folder in `/app`, which the non-root user couldn't create. The Dockerfile now creates it for `appuser`.
+- Live: `/health` ok, `/risk/latest` returns 488 cells for 2026-11-12 (460 low, 27 moderate, 1 extreme), and `/reload` from the laptop answers with the serving Hub commit.
+- A pipeline run reloads both APIs: the laptop's, then Render's after the upload.
+
+**Notes**
+- **The schedule still needs this PC.** If the PC is off, the public map keeps the last good day and shows its stale banner. Moving the pipeline to a cloud scheduler (e.g. GitHub Actions) would remove that dependency; the full feature history (118 MB) and the weather download quota make it a separate project.
+- **Free plans have limits**: cold starts of about a minute, 512 MB RAM for the API, and the map sleeps after 12 hours without visitors.
+
 ## Scripts
 
 | Script | What it does |
@@ -685,18 +741,21 @@ streamlit run app/streamlit_app.py  # or run the map from the venv (API must be 
 | `src/risk_levels.py` | Sets the low / moderate / high / extreme cutoffs from 2024–2026 risk quantiles; saves `models/risk_levels.json` |
 | `src/export_serving.py` | Writes the small serving files the API reads: `data/serving/recent_features.parquet` and `grid.geojson` |
 | `src/api/` | FastAPI service: `schemas.py` (request/response shapes), `predictor.py` (model, levels, reasons), `store.py` (serving data), `main.py` (endpoints, logging, errors) |
+| `src/api/hub_sync.py` | Downloads the 5 serving files from the Hugging Face Hub (one exact commit) when `HF_REPO` is set; does nothing locally |
+| `src/publish_hub.py` | Uploads the 5 serving files to the Hub in one commit; called by the daily pipeline, or by hand: `python -m src.publish_hub` |
 | `src/call_api.py` | Sends real feature rows to the running API: `python src\call_api.py predict` or `batch [YYYY-MM-DD]` |
-| `Dockerfile` | Builds the API image: Python 3.12-slim, `libgomp1`, pinned packages, non-root user, health check, `PORT` variable |
-| `.dockerignore` | Allowlist: only `src/api/`, `models/`, `data/serving/` and `requirements-api.txt` reach the build |
+| `Dockerfile` | Builds the API image: Python 3.12-slim, `libgomp1`, pinned packages, non-root user, health check, `PORT` variable; code only since Day 17 (model and data come from the Compose mounts or the Hugging Face Hub) |
+| `.dockerignore` | Allowlist: only `src/api/` and `requirements-api.txt` reach the build |
 | `requirements-api.txt` | Runtime packages for the container only, pinned to the training versions |
 | `docker-compose.yml` | Runs the API (port 8000, read-only mounts of `data/serving` and `models`, `RELOAD_TOKEN` from `.env`) and the map (port 8501, starts after the API is healthy); both auto-restart with a 512 MB memory cap |
-| `src/pipeline/` | Daily pipeline: `config.py` (paths, windows, keys), `fetch_fires.py`, `fetch_weather.py`, `fetch_ndvi.py`, `build_features.py`, `checks.py` (quality gate), `score.py` (score, history, publish), `notify_api.py` (`POST /reload`), `run_daily.py` (runner) |
+| `src/pipeline/` | Daily pipeline: `config.py` (paths, windows, keys), `fetch_fires.py`, `fetch_weather.py`, `fetch_ndvi.py`, `build_features.py`, `checks.py` (quality gate), `score.py` (score, history, publish), `notify_api.py` (`POST /reload` on the laptop and live API), `run_daily.py` (runner) |
 | `app/api_client.py` | The map's only link to the API: address from `WILDFIRE_API_URL`, timeouts, one `ApiError` for every failure |
 | `app/streamlit_app.py` | Lebanon Fire Radar: summary cards, risk map, click-to-explain panel, day picker, legend, top-10 table + CSV, stale-data banner |
 | `.streamlit/config.toml` | Theme (wildfire colors) and settings (minimal toolbar, no usage stats) |
 | `Dockerfile.app` | Builds the map image: Python 3.12-slim, pinned packages, non-root user, health check, `PORT` and `WILDFIRE_API_URL` variables |
 | `Dockerfile.app.dockerignore` | Allowlist for the map image: only `app/`, `.streamlit/config.toml` and `requirements-app.txt` |
 | `requirements-app.txt` | Runtime packages for the map container only, pinned to the venv versions |
+| `app/requirements.txt` | Points Streamlit Community Cloud to `requirements-app.txt`, so it installs only the map's packages |
 | `scripts/run_pipeline.cmd` | Launcher for Windows Task Scheduler: runs `run_daily` with the project's venv |
 | `scripts/smoke_test.py` | 11 end-to-end checks against a running API, local or deployed: `python scripts\smoke_test.py [URL]` |
 | `tests/test_features.py` | pytest checks: future-leakage test, label correctness, completeness, NDVI timing, feature list |
@@ -750,3 +809,6 @@ streamlit run app/streamlit_app.py  # or run the map from the venv (API must be 
 38. `python -m src.pipeline.run_daily` *(every morning; scheduled with Task Scheduler)*
 39. `python -m pytest tests\test_pipeline.py -v`
 40. `docker compose up -d --build` *(API + live map; open http://localhost:8501)*
+41. `python -m src.publish_hub` *(first upload of the serving files to the Hugging Face Hub; afterwards the daily pipeline does it)*
+42. Deploy the API on Render (Docker, `HF_REPO` + `RELOAD_TOKEN`) and the map on Streamlit Community Cloud (`app/streamlit_app.py`, secret `WILDFIRE_API_URL`)
+43. `python scripts\smoke_test.py https://lebanon-fire-radar-api.onrender.com` *(the same 11 checks against the live API)*
