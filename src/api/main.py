@@ -133,7 +133,7 @@ def build_map(day: dt.date, p: Predictor, store: FeatureStore) -> RiskMapRespons
     )  # end of the answer
 
 
-@app.get("/", include_in_schema=False)  # the bare address; hidden from /docs
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)  # the bare address; HEAD too, because Render probes "/" with HEAD (Day 17); hidden from /docs
 def root() -> RedirectResponse:  # opening http://127.0.0.1:8000 in a browser...
     return RedirectResponse(url="/docs")  # ...goes straight to the interactive docs
 

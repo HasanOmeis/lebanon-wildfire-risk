@@ -5,8 +5,9 @@ import os  # reads the API address from an environment variable
 
 import requests  # HTTP calls to the FastAPI service
 
-API_URL = os.getenv("WILDFIRE_API_URL", "http://127.0.0.1:8000").rstrip("/")  # API address; local by default, set on Day 17 for the cloud
+API_URL = os.getenv("WILDFIRE_API_URL", "http://127.0.0.1:8000").rstrip("/")  # API address; local by default, the Render URL in the cloud (Day 17)
 TIMEOUT = (5, 30)  # (seconds to connect, seconds to wait for the answer); the full map takes a moment to build
+WAKE_TIMEOUT = (10, 100)  # for /health only: Render's free plan sleeps when idle and needs ~1 min to wake up (Day 17)
 
 
 class ApiError(Exception):  # one error type for everything that can go wrong, so the page only catches this
@@ -15,12 +16,12 @@ class ApiError(Exception):  # one error type for everything that can go wrong, s
         self.status = status  # e.g. 404 when a day isn't served; None when the API couldn't be reached
 
 
-def _get(path: str, params: dict | None = None) -> dict:  # shared GET: builds the URL, handles every failure the same way
+def _get(path: str, params: dict | None = None, timeout: tuple = TIMEOUT) -> dict:  # shared GET: builds the URL, handles every failure the same way
     url = f"{API_URL}{path}"  # full address, e.g. http://127.0.0.1:8000/risk/latest
     try:  # the request itself can fail before any answer arrives
-        resp = requests.get(url, params=params, timeout=TIMEOUT)  # send it
+        resp = requests.get(url, params=params, timeout=timeout)  # send it, with the normal or the wake-up timeout
     except requests.Timeout as err:  # connected but no answer in time, or couldn't connect in time
-        raise ApiError(f"The API at {API_URL} took too long to answer.") from err  # friendly message, original error kept
+        raise ApiError(f"The API at {API_URL} took too long to answer. If it was asleep, click Retry in a moment.") from err  # friendly message, original error kept
     except requests.ConnectionError as err:  # nothing listening at that address (container stopped, wrong URL)
         raise ApiError(f"Can't reach the API at {API_URL}. Is it running?") from err  # friendly message, original error kept
     if resp.status_code != 200:  # the API answered, but with an error
@@ -32,8 +33,8 @@ def _get(path: str, params: dict | None = None) -> dict:  # shared GET: builds t
     return resp.json()  # success: the answer as Python dicts and lists
 
 
-def get_health() -> dict:  # GET /health: model file, training end date, risk cutoffs
-    return _get("/health")  # no parameters needed
+def get_health() -> dict:  # GET /health: model file, training end date, risk cutoffs; the page's first call, so it also wakes the API
+    return _get("/health", timeout=WAKE_TIMEOUT)  # long timeout: waits through Render's cold start instead of failing (Day 17)
 
 
 def get_risk(day: dt.date | None = None) -> dict:  # GET /risk/latest or /risk/{day}: every cell's risk plus the polygons

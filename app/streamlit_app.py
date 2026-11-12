@@ -66,16 +66,16 @@ HOW_IT_WORKS = f"""
 1. **Data**: NASA FIRMS fire detections, Open-Meteo weather, MODIS vegetation (NDVI) and terrain, on a grid of 488 cells (~5 km).
 2. **Features**: 52 per cell per day: dryness, heat, wind, rain history, vegetation, slope, and how often the area burned before.
 3. **Model**: LightGBM, tuned with Optuna and checked on years and regions it never saw. Each day it scores how likely a fire is in every cell **tomorrow**.
-4. **Daily pipeline**: every day it pulls fresh data, rebuilds the features, runs quality checks, scores all cells and reloads the API.
-5. **This page**: reads the FastAPI service; clicking a cell shows its top SHAP reasons.
+4. **Daily pipeline**: every day it pulls fresh data, rebuilds the features, runs quality checks, scores all cells, uploads the model and serving files to the Hugging Face Hub, and reloads the live API.
+5. **This page**: reads the FastAPI service (Docker on Render); clicking a cell shows its top SHAP reasons. Both run on free plans that sleep when idle, so the first visit can take about a minute.
 
 [Code on GitHub]({REPO_URL})
 """  # sidebar text; Markdown, with the repo link filled in
 
 
-@st.cache_data(ttl=CACHE_SECONDS, show_spinner=False)  # remember the answer; errors are NOT cached, so a failed call is retried next time
-def load_health() -> dict:  # model info from /health
-    return get_health()  # one API call
+@st.cache_data(ttl=CACHE_SECONDS, show_spinner="Waking up the server... free hosting sleeps when nobody visits, so the first load can take up to a minute.")  # first call of every visit; errors are NOT cached, so a failed call is retried next time (Day 17)
+def load_health() -> dict:  # model info from /health; also wakes a sleeping API, so every later call is fast
+    return get_health()  # one API call, with the long wake-up timeout (see api_client.py)
 
 
 @st.cache_data(ttl=CACHE_SECONDS, show_spinner="Loading the risk map...")  # cached per day; shows a spinner while the API builds the map
