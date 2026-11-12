@@ -10,3 +10,4 @@ scipy==1.18.1              # required by lightgbm; pinned so the container match
 numpy==2.5.4               # math arrays used by the predictor
 pandas==3.1.0              # feature tables and read_parquet in store.py
 pyarrow==25.0.1            # the engine pandas uses to read recent_features.parquet
+huggingface_hub==2.4.0     # downloads the model and serving files from the Hugging Face Hub at startup (Day 17)

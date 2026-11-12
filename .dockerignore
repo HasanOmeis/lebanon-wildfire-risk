@@ -7,15 +7,8 @@
 # Let back in the API code only (not training scripts in src/)
 !src/api/
 
-# Let back in the trained model, its metadata and the risk cutoffs
-!models/
-
-# Let back in the serving data: recent features and the grid polygons
-!data/serving/
-
 # Even inside allowed folders, skip Python bytecode caches (rebuilt automatically)
 **/__pycache__
 **/*.pyc
 
-# Skip the empty placeholder that only exists so Git keeps the models folder
-models/.gitkeep
+# models/ and data/serving/ are no longer sent to Docker: the image is code only (Day 17)

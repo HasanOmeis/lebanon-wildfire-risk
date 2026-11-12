@@ -1,14 +1,14 @@
 """FastAPI app: serves next-day wildfire risk for Lebanon's 5 km grid."""  # file description
 
 import datetime as dt  # date type for URLs, and timedelta for the forecast day (t + 1)
-import hmac  # NEW: compares secrets in constant time
+import hmac  # compares secrets in constant time
 import logging  # writes log lines
-import os  # NEW: reads RELOAD_TOKEN from the environment
+import os  # reads RELOAD_TOKEN from the environment
 import time  # measures how long each request takes
 from contextlib import asynccontextmanager  # turns a function into "run at startup, then at shutdown"
 
 import pandas as pd  # type of the feature rows passed between helpers
-from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request  # Header = read a value from the request headers (NEW)
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request  # Header = read a value from the request headers
 from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse = build an answer by hand, RedirectResponse = send elsewhere
 
 from .predictor import FeatureError, Predictor  # our model loader and its "bad features" error (Step 5)
@@ -20,6 +20,7 @@ from .schemas import (  # request and response shapes (Step 4)
     Prediction,  # answer for one cell-day (also used by /explain)
     RiskMapResponse,  # answer of /risk
 )  # end of the imports
+from .hub_sync import sync_from_hub  # downloads the model + serving files from Hugging Face when HF_REPO is set (Day 17)
 from .store import FeatureStore  # serving data loader (Step 9B)
 
 logging.basicConfig(  # set up logging once, when the app is imported
@@ -29,24 +30,27 @@ logging.basicConfig(  # set up logging once, when the app is imported
 log = logging.getLogger("wildfire.api")  # this app's own logger, so its lines are easy to spot
 
 
-def load_state(app: FastAPI) -> None:  # NEW: load model + serving data, then swap them in together
+def load_state(app: FastAPI) -> None:  # sync from Hugging Face (cloud only), load model + serving data, then swap them in together
+    commit = sync_from_hub()  # cloud: download the newest files into models/ and data/serving/; laptop: returns None and does nothing (Day 17)
     predictor = Predictor()  # load the model, metadata and cutoffs; a broken file raises here
     store = FeatureStore()  # load the serving features and grid; a broken file raises here
     app.state.predictor, app.state.store = predictor, store  # swap both only after BOTH loaded fine
+    app.state.hub_commit = commit  # which Hugging Face upload is serving (None = local files) (Day 17)
     log.info("Model %s loaded: trained to %s, %d features", predictor.model_file, predictor.trained_to, len(predictor.feature_cols))  # what's serving
     log.info("Serving features %s to %s (%d days)", store.first, store.last, len(store.by_day))  # the date window
+    log.info("Files from: %s", f"Hugging Face commit {commit[:7]}" if commit else "local folders")  # where the files came from (Day 17)
 
 
 @asynccontextmanager  # makes lifespan usable by FastAPI as a startup/shutdown block
 async def lifespan(app: FastAPI):  # FastAPI calls this once when the server starts
-    load_state(app)  # NEW: same loader as /reload, so startup and reload can never differ
+    load_state(app)  # same loader as /reload, so startup and reload can never differ
     yield  # the server runs and handles requests while we're paused here
     log.info("Shutting down")  # runs when the server stops
 
 
 app = FastAPI(  # create the web app
     title="Lebanon Wildfire-Risk API",  # shown at the top of /docs
-    version="1.1.0",  # NEW: minor version bump for the /reload endpoint
+    version="1.2.0",  # minor version bump: files can come from the Hugging Face Hub (Day 17)
     description="Next-day wildfire risk for every ~5 km grid cell in Lebanon (LightGBM + SHAP reasons).",  # short summary in /docs
     lifespan=lifespan,  # use our startup block
 )  # end of the app
@@ -145,8 +149,8 @@ def health(p: Predictor = Depends(get_predictor)) -> HealthResponse:  # FastAPI 
     )  # end of the answer
 
 
-@app.post("/reload", tags=["system"])  # NEW: POST /reload, called by the daily pipeline after it publishes
-def reload(  # NEW: reload model + serving data without restarting the server
+@app.post("/reload", tags=["system"])  # POST /reload, called by the daily pipeline after it publishes
+def reload(  # sync + reload model and serving data without restarting the server
     request: Request,  # gives access to app.state
     x_reload_token: str | None = Header(None, description="Secret from RELOAD_TOKEN"),  # read from the X-Reload-Token header
 ) -> dict:  # small JSON answer
@@ -157,8 +161,8 @@ def reload(  # NEW: reload model + serving data without restarting the server
         raise HTTPException(status_code=401, detail="Invalid or missing X-Reload-Token")  # refused
     old_last = request.app.state.store.last  # newest served day before the reload
     try:  # loading new files can fail
-        load_state(request.app)  # load both, then swap (old data stays if this raises)
-    except Exception as err:  # broken or half-written files
+        load_state(request.app)  # sync, load both, then swap (old data stays in memory if this raises)
+    except Exception as err:  # Hugging Face unreachable, or broken files
         log.exception("Reload failed; still serving the previous data")  # full details in OUR logs
         raise HTTPException(status_code=500, detail="Reload failed; still serving the previous data") from err  # clean answer
     store, p = request.app.state.store, request.app.state.predictor  # the freshly loaded objects
@@ -169,6 +173,7 @@ def reload(  # NEW: reload model + serving data without restarting the server
         "previous_served_to": str(old_last),  # newest served day before
         "forecast_for": str(store.last + dt.timedelta(days=1)),  # the day /risk/latest is now about
         "model_file": p.model_file,  # which model is serving
+        "hub_commit": request.app.state.hub_commit,  # which Hugging Face upload is now serving (None = local files) (Day 17)
     }  # end of the answer
 
 

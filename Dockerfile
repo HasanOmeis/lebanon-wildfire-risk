@@ -15,6 +15,8 @@ ENV PIP_DEFAULT_TIMEOUT=120
 ENV PIP_RETRIES=10
 # Default port; deploy platforms can override it with their own PORT value
 ENV PORT=8000
+# Don't send usage statistics to Hugging Face from inside the container
+ENV HF_HUB_DISABLE_TELEMETRY=1
 
 # All following paths are inside /app; this becomes the project root (ROOT in predictor.py and store.py)
 WORKDIR /app
@@ -30,12 +32,12 @@ RUN pip install -r requirements-api.txt
 # Create an unprivileged user (fixed ID 10001) to run the API instead of root
 RUN useradd --create-home --uid 10001 appuser
 
+# Create the folders the Hugging Face download writes to (model, serving data, and the .cache folder where it tracks downloaded versions), owned by appuser
+RUN mkdir -p models data/serving .cache && chown -R appuser:appuser models data .cache
+
 # Copy the API code into /app/src/api (same layout as the project, so the relative paths still work)
 COPY src/api ./src/api
-# Copy the trained model, metadata and risk cutoffs into /app/models
-COPY models ./models
-# Copy the serving features and grid into /app/data/serving
-COPY data/serving ./data/serving
+# No model or data in the image: locally they come from the Compose mounts, in the cloud from Hugging Face at startup
 
 # From here on, everything runs as appuser, not root
 USER appuser
@@ -43,8 +45,8 @@ USER appuser
 # Document that the app listens on port 8000 (the real mapping happens with -p at docker run)
 EXPOSE 8000
 
-# Every 30 s, call /health; wait 20 s after start for the model to load; 3 failures in a row = "unhealthy"
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD python -c "import os, urllib.request as u; u.urlopen('http://localhost:' + os.environ.get('PORT', '8000') + '/health', timeout=4)"
+# Every 30 s, call /health; wait 60 s after start (the cloud downloads ~7 MB first); 3 failures in a row = "unhealthy"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 CMD python -c "import os, urllib.request as u; u.urlopen('http://localhost:' + os.environ.get('PORT', '8000') + '/health', timeout=4)"
 
 # Start uvicorn on all network interfaces at $PORT; exec makes it the main process; no duplicate access log
 CMD ["sh", "-c", "exec uvicorn src.api.main:app --host 0.0.0.0 --port ${PORT} --no-access-log"]

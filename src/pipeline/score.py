@@ -1,4 +1,4 @@
-"""Score the checked serving day with the API's own Predictor, save history, and refresh the API's serving files."""  # file description
+"""Score the checked serving day with the API's own Predictor, save history, refresh the serving files, and publish them."""  # file description
 
 import datetime as dt  # dates and the run timestamp
 import json  # writes latest.json
@@ -7,10 +7,11 @@ import logging  # log lines for the runner
 import pandas as pd  # tables
 
 from src.api.predictor import Predictor  # Day 13: the exact model wrapper the API uses
+from src.publish_hub import publish  # Day 17: uploads the serving files to Hugging Face
 
 from . import config as C  # pipeline settings (Step 2)
 from .build_features import run_script  # Step 6: runs a project script and stops on failure
-from .notify_api import reload_api  # NEW (Step 10B): tells the running API to reload
+from .notify_api import reload_api  # tells a running API (laptop or live) to reload
 
 log = logging.getLogger("pipeline.score")  # this step's own logger
 
@@ -52,17 +53,24 @@ def save_history(pred: pd.DataFrame) -> None:  # one parquet per forecast day + 
     log.info("Saved %s and latest.json; levels %s", path.name, summary["levels"])  # record it
 
 
-def publish_serving() -> None:  # refresh data/serving (what the API reads), then tell the API
+def publish_serving() -> None:  # refresh data/serving, reload the laptop API, upload to Hugging Face, reload the live API
     run_script("src/export_serving.py")  # Day 13 script, unchanged: grid.geojson + last 400 days of features
     last = pd.read_parquet(C.SERVING / "recent_features.parquet", columns=["date"])["date"].max().date()  # newest served day
     log.info("Serving files refreshed; newest served day %s", last)  # the API's /risk/latest will show last + 1
-    reload_api()  # NEW: the running API swaps in the new files now (a warning only if it's down)
+    reload_api("API_URL")  # 1. the laptop API swaps in the new files now (a warning only if it's down)
+
+    try:  # 2. upload to Hugging Face (Day 17); a failure must not undo the local update
+        publish(f"Serving update: features to {last}")  # one commit with all 5 files, named after the newest day
+    except Exception as e:  # no internet, Hub down, token expired or missing...
+        log.warning("Hugging Face upload failed (%s: %s); the live map keeps yesterday's data", type(e).__name__, e)  # warn, don't fail the run
+        return  # nothing new on the Hub, so there's no point waking the live API
+    reload_api("LIVE_API_URL")  # 3. the live API (Render) pulls the new upload; skipped until LIVE_API_URL is set in .env
 
 
 def score_and_publish(rows: pd.DataFrame, day: dt.date) -> pd.DataFrame:  # main step: score, save, publish
     pred = score_day(rows, day)  # 1. score
     save_history(pred)  # 2-3. history file + summary
-    publish_serving()  # 4. refresh the API's files and reload it (last, after everything else succeeded)
+    publish_serving()  # 4. refresh files, reload laptop API, upload, reload live API (last, after everything else succeeded)
     return pred  # for the runner's report
 
 
