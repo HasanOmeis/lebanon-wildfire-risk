@@ -1,6 +1,6 @@
-  # Lebanon Fire Radar: Build Log
+# Lebanon Fire Radar: Build Log
 
-  The full day-by-day record of how this project was built: every decision, result and fix. For the short overview, see the [main README](../README.md).
+The full day-by-day record of how this project was built: every decision, result and fix. For the short overview, see the [main README](../README.md).
 
 Predicts next-day wildfire risk for every ~5 km grid cell across Lebanon and shows it on a live map.
 
