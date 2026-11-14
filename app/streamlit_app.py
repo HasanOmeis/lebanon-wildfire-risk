@@ -39,6 +39,7 @@ h3 {font-size: 1rem !important; line-height: 1.3 !important; padding: 0 !importa
 [data-testid="stMetricValue"] {font-size: 1.1rem;}  /* small card numbers */
 [data-testid="stMetricDelta"] {font-size: 0.68rem;}  /* small grey notes under the numbers */
 [data-testid="stMarkdownContainer"] p {margin-bottom: 0.15rem; font-size: 0.85rem;}  /* smaller text, less space under paragraphs */
+[data-testid="stMarkdownContainer"] {margin-bottom: 0 !important;}  /* Streamlit pulls each text block up 1rem to cancel the paragraph gap; we removed that gap above, so cancel the pull too, or text overlaps */
 .legend {display: flex; flex-wrap: wrap; gap: 0.9rem; font-size: 0.75rem; color: #6b5d50; margin: 0.3rem 0 0.7rem 0;}  /* legend row; bottom margin keeps it off the Top 10 bar */
 .legend span.sw {display: inline-block; width: 0.9rem; height: 0.9rem; border: 1px solid #aaa; border-radius: 2px; vertical-align: -2px; margin-right: 0.3rem;}  /* the color square */
 </style>
